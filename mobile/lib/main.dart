@@ -59,7 +59,8 @@ class _MainScreenState extends State<MainScreen> {
   WebSocketService? _wsService;
   SendPort? _isolateSendPort;
   Isolate? _streamIsolate;
-  bool _conversionInProgress = false;
+  int _pendingConversions = 0; // Track pending conversions for parallel processing
+  static const int _maxPendingConversions = 3; // Allow up to 3 parallel conversions
   
   // Frame rate monitoring with rolling window
   final List<DateTime> _frameTimestamps = [];
@@ -96,7 +97,7 @@ class _MainScreenState extends State<MainScreen> {
 
     _cameraController = CameraController(
       widget.cameras[0],
-      ResolutionPreset.high,
+      ResolutionPreset.medium,
       enableAudio: false,
     );
 
@@ -163,14 +164,14 @@ class _MainScreenState extends State<MainScreen> {
             return; // Skip this frame to prevent queue backup
           }
           
-          // Frame dropping: skip if conversion is already in progress
-          if (_conversionInProgress) {
+          // Frame dropping: skip if too many conversions are pending (prevent memory buildup)
+          if (_pendingConversions >= _maxPendingConversions) {
             _droppedFrameCount++;
-            return; // Skip this frame
+            return; // Skip this frame to prevent too many parallel conversions
           }
           
-          // Mark conversion as in progress
-          _conversionInProgress = true;
+          // Increment pending conversions counter
+          _pendingConversions++;
           
           // Track frame timestamp for FPS calculation
           _frameTimestamps.add(now);
@@ -179,14 +180,14 @@ class _MainScreenState extends State<MainScreen> {
           final cutoffTime = now.subtract(const Duration(seconds: 2));
           _frameTimestamps.removeWhere((timestamp) => timestamp.isBefore(cutoffTime));
           
-          // Convert frame in isolate (non-blocking)
+          // Convert frame in isolate (non-blocking, allows parallel processing)
           CameraStreamIsolate.convertImageToBytes(image).then((frameData) {
             // Send frame non-blocking (queued)
             _wsService!.sendFrame(frameData);
-            _conversionInProgress = false;
+            _pendingConversions--;
           }).catchError((e) {
             // Handle conversion errors without blocking the stream
-            _conversionInProgress = false;
+            _pendingConversions--;
             if (mounted) {
               // Only show error for critical failures, not for every frame
               print('Frame conversion error: $e');
@@ -250,7 +251,7 @@ class _MainScreenState extends State<MainScreen> {
       _isStreaming = false;
       _cameraController = null;
       _wsService = null;
-      _conversionInProgress = false;
+      _pendingConversions = 0;
       _frameTimestamps.clear();
       _droppedFrameCount = 0;
       _currentFps = 0.0;

@@ -1,0 +1,37 @@
+name: forge_3d_mobile
+description: Flutter mobile client for Forge Engine 3D reconstruction pipeline
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # Camera
+  camera: ^0.10.5+5
+  
+  # WebSocket
+  web_socket_channel: ^2.4.0
+  
+  # HTTP client
+  http: ^1.1.0
+  
+  # QR Code Scanner
+  qr_code_scanner: ^1.0.1
+  
+  # Storage
+  shared_preferences: ^2.2.2
+  
+  # UI
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true

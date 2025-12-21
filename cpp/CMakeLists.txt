@@ -92,6 +92,37 @@ if(NOT pybind11_FOUND)
     endif()
 endif()
 
+# Find OpenCV
+find_package(OpenCV REQUIRED)
+if(OpenCV_FOUND)
+    message(STATUS "Found OpenCV ${OpenCV_VERSION}")
+    message(STATUS "OpenCV libraries: ${OpenCV_LIBS}")
+    message(STATUS "OpenCV include dirs: ${OpenCV_INCLUDE_DIRS}")
+else()
+    message(FATAL_ERROR 
+        "OpenCV not found. Please install it first:\n"
+        "  brew install opencv\n"
+        "  or\n"
+        "  Download from https://opencv.org/releases/\n\n"
+        "Then run cmake again."
+    )
+endif()
+
+# Find Eigen3
+find_package(Eigen3 REQUIRED)
+if(Eigen3_FOUND)
+    message(STATUS "Found Eigen3 ${EIGEN3_VERSION_STRING}")
+    message(STATUS "Eigen3 include dir: ${EIGEN3_INCLUDE_DIR}")
+else()
+    message(FATAL_ERROR 
+        "Eigen3 not found. Please install it first:\n"
+        "  brew install eigen\n"
+        "  or\n"
+        "  Download from https://eigen.tuxfamily.org/\n\n"
+        "Then run cmake again."
+    )
+endif()
+
 # Accelerate is an Apple framework, not a CMake package
 # We'll link it directly
 if(APPLE)
@@ -108,12 +139,15 @@ endif()
 # Include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${OpenCV_INCLUDE_DIRS}
+    ${EIGEN3_INCLUDE_DIR}
 )
 
 # Source files
 set(SOURCES
     src/FrameProcessor.cpp
     src/Model3D.cpp
+    src/DepthBuffer.cpp
     src/pybind_module.cpp
 )
 
@@ -122,10 +156,17 @@ set(HEADERS
     include/forge_engine/FrameProcessor.hpp
     include/forge_engine/CircularBuffer.hpp
     include/forge_engine/Model3D.hpp
+    include/forge_engine/DepthBuffer.hpp
 )
 
 # Create shared library
 pybind11_add_module(forge_engine ${SOURCES} ${HEADERS})
+
+# Link libraries
+target_link_libraries(forge_engine PRIVATE
+    ${OpenCV_LIBS}
+    Eigen3::Eigen
+)
 
 # Link Accelerate framework
 if(APPLE)

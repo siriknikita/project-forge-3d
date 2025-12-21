@@ -2,6 +2,14 @@
 
 High-performance 3D reconstruction pipeline for real-time processing between mobile devices and M4-series Macs. Achieves 1080p @ 30 FPS with sub-100ms end-to-end latency.
 
+## Algorithm Documentation
+
+For detailed information about the core 3D reconstruction algorithm, see [docs/ALGORITHM.md](docs/ALGORITHM.md). This document covers:
+- Mathematical foundations (feature detection, color-depth heuristics, composition)
+- Algorithm pseudocode and implementation details
+- Data structures and performance characteristics
+- Parameter configuration and tuning guidelines
+
 ## Architecture
 
 - **C++ Core Library**: Accelerate Framework + Grand Central Dispatch for high-speed processing

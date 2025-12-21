@@ -99,6 +99,19 @@ public:
     bool exportOBJ(const std::string& filename) const;
 
     /**
+     * Export to GLB (glTF Binary) format with UV mapping.
+     * @param filename Output filename
+     * @param texture_data Optional texture image data (RGBA)
+     * @param texture_width Texture width
+     * @param texture_height Texture height
+     * @return True if successful
+     */
+    bool exportGLB(const std::string& filename, 
+                   const uint8_t* texture_data = nullptr,
+                   uint32_t texture_width = 0,
+                   uint32_t texture_height = 0) const;
+
+    /**
      * Get model statistics.
      */
     struct Statistics {

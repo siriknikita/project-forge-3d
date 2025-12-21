@@ -281,6 +281,42 @@ async def export_ply(
     )
 
 
+@app.get("/export/glb")
+async def export_glb(token: str = Query(..., description="Session token")):
+    """
+    Export model as GLB file.
+    
+    Args:
+        token: Session token
+        
+    Returns:
+        GLB file download
+    """
+    if not pairing_manager.validate_session_token(token):
+        raise HTTPException(status_code=401, detail="Invalid session token")
+    
+    if not ENGINE_AVAILABLE or frame_processor is None:
+        raise HTTPException(status_code=404, detail="No model available")
+    
+    model = frame_processor.getModel()
+    if model.getVertexCount() == 0:
+        raise HTTPException(status_code=404, detail="Model is empty")
+    
+    filename = f"model_{int(asyncio.get_event_loop().time())}.glb"
+    filepath = f"/tmp/{filename}"
+    
+    success = model.exportGLB(filepath)
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to export model as GLB. GLB export is currently a placeholder - use OBJ export instead.")
+    
+    return FileResponse(
+        filepath,
+        media_type="model/gltf-binary",
+        filename=filename
+    )
+
+
 @app.get("/export/obj")
 async def export_obj(token: str = Query(..., description="Session token")):
     """

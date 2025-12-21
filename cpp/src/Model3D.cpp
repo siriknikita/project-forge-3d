@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 
 namespace forge_engine {
 
@@ -195,6 +196,62 @@ bool Model3D::exportOBJ(const std::string& filename) const {
 
     file.close();
     return true;
+}
+
+bool Model3D::exportGLB(const std::string& filename,
+                        const uint8_t* /*texture_data*/,
+                        uint32_t /*texture_width*/,
+                        uint32_t /*texture_height*/) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Note: Full GLB export is complex. This is a simplified implementation.
+    // For production use, consider using tinygltf library.
+    // For now, we'll export as OBJ and note that GLB export needs enhancement.
+    
+    // GLB format structure:
+    // - 12-byte header (magic, version, length)
+    // - JSON chunk (chunk type, chunk length, JSON data)
+    // - BIN chunk (chunk type, chunk length, binary data)
+    
+    std::ofstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+    
+    // For now, create a minimal valid GLB structure
+    // This is a placeholder - full implementation would require:
+    // 1. JSON glTF structure with scenes, nodes, meshes, accessors, bufferViews
+    // 2. Binary buffer with vertex positions, normals, UVs, indices
+    // 3. Proper chunk alignment (4-byte)
+    
+    // GLB Header (12 bytes)
+    uint32_t magic = 0x46546C67;  // "glTF"
+    uint32_t version = 2;
+    uint32_t total_length = 0;  // Will be calculated
+    
+    file.write(reinterpret_cast<const char*>(&magic), 4);
+    file.write(reinterpret_cast<const char*>(&version), 4);
+    file.write(reinterpret_cast<const char*>(&total_length), 4);
+    
+    // For a complete implementation, we would:
+    // 1. Build JSON glTF structure
+    // 2. Pack binary data (vertices, indices)
+    // 3. Write JSON chunk
+    // 4. Write BIN chunk
+    // 5. Update total_length in header
+    
+    // This is a minimal placeholder - full GLB export requires significant work
+    // Consider using tinygltf library for production
+    
+    file.close();
+    
+    // For now, fall back to OBJ export as GLB is complex
+    // In production, implement full GLB or use tinygltf
+    std::cerr << "[Model3D] GLB export is a placeholder. "
+              << "Full GLB implementation requires glTF library. "
+              << "Consider using exportOBJ() or integrating tinygltf." << std::endl;
+    
+    return false;  // Indicate that full GLB export is not yet implemented
 }
 
 } // namespace forge_engine

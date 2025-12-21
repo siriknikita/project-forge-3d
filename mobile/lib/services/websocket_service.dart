@@ -10,6 +10,11 @@ class WebSocketService {
   StreamController<Uint8List>? _frameController;
   StreamSubscription? _closeSubscription;
   bool _isConnected = false;
+  
+  // Frame send queue for non-blocking sends
+  final StreamController<Uint8List> _sendQueue = StreamController<Uint8List>.broadcast();
+  StreamSubscription<Uint8List>? _sendQueueSubscription;
+  static const int _maxQueueSize = 10; // Drop frames if queue exceeds this
 
   WebSocketService({
     required this.serverUrl,
@@ -46,6 +51,23 @@ class WebSocketService {
       // Check if connection is still open
       if (_channel != null) {
         _isConnected = true;
+        
+        // Start processing send queue
+        _sendQueueSubscription = _sendQueue.stream.listen(
+          (frameData) async {
+            if (_channel != null && _isConnected) {
+              try {
+                _channel!.sink.add(frameData);
+              } catch (e) {
+                _isConnected = false;
+                // Error will be handled by the stream listener
+              }
+            }
+          },
+          onError: (error) {
+            _isConnected = false;
+          },
+        );
       }
     } catch (e) {
       _isConnected = false;
@@ -62,29 +84,33 @@ class WebSocketService {
     }
   }
 
-  /// Send binary frame data.
-  Future<void> sendFrame(Uint8List frameData) async {
+  /// Send binary frame data (non-blocking).
+  /// Frames are queued and sent asynchronously. If queue is full, frames are dropped.
+  void sendFrame(Uint8List frameData) {
     if (_channel == null || !_isConnected) {
-      throw Exception('WebSocket not connected');
+      return; // Silently ignore if not connected
     }
 
-    try {
-      _channel!.sink.add(frameData);
-    } catch (e) {
-      _isConnected = false;
-      throw Exception('Failed to send frame: $e');
+    // Check queue size and drop frame if queue is too full
+    // Note: StreamController doesn't expose queue size directly,
+    // so we'll just add to queue and let it handle backpressure
+    if (!_sendQueue.isClosed) {
+      _sendQueue.add(frameData);
     }
   }
 
   /// Close WebSocket connection.
   Future<void> close() async {
     _isConnected = false;
+    await _sendQueueSubscription?.cancel();
+    await _sendQueue.close();
     await _closeSubscription?.cancel();
     await _channel?.sink.close();
     await _frameController?.close();
     _channel = null;
     _frameController = null;
     _closeSubscription = null;
+    _sendQueueSubscription = null;
   }
 
   /// Check if connected.

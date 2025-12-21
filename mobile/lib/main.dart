@@ -59,6 +59,12 @@ class _MainScreenState extends State<MainScreen> {
   WebSocketService? _wsService;
   SendPort? _isolateSendPort;
   Isolate? _streamIsolate;
+  bool _conversionInProgress = false;
+  
+  // Frame rate monitoring
+  int _frameCount = 0;
+  int _droppedFrameCount = 0;
+  DateTime? _lastFpsLogTime;
 
   @override
   void initState() {
@@ -138,18 +144,50 @@ class _MainScreenState extends State<MainScreen> {
       }
 
       // Start camera stream
-      await _cameraController!.startImageStream((CameraImage image) async {
+      await _cameraController!.startImageStream((CameraImage image) {
         if (_wsService != null && _wsService!.isConnected) {
-          try {
-            final frameData = CameraStreamIsolate.convertImageToBytes(image);
-            await _wsService!.sendFrame(frameData);
-          } catch (e) {
-            // Connection lost during streaming
-            if (mounted) {
-              _showError('Connection lost: $e');
-              await _stopStreaming();
-            }
+          // Frame dropping: skip if conversion is already in progress
+          if (_conversionInProgress) {
+            _droppedFrameCount++;
+            return; // Skip this frame
           }
+          
+          // Mark conversion as in progress
+          _conversionInProgress = true;
+          _frameCount++;
+          
+          // Convert frame in isolate (non-blocking)
+          CameraStreamIsolate.convertImageToBytes(image).then((frameData) {
+            // Send frame non-blocking (queued)
+            _wsService!.sendFrame(frameData);
+            _conversionInProgress = false;
+            
+            // Log FPS periodically (every 30 frames ~1 second at 30 FPS)
+            if (_frameCount % 30 == 0) {
+              final now = DateTime.now();
+              if (_lastFpsLogTime != null) {
+                final elapsed = now.difference(_lastFpsLogTime!).inMilliseconds / 1000.0;
+                if (elapsed > 0) {
+                  final fps = 30.0 / elapsed;
+                  final dropRate = _droppedFrameCount > 0 
+                      ? (_droppedFrameCount / (_frameCount + _droppedFrameCount) * 100).toStringAsFixed(1)
+                      : '0.0';
+                  print('FPS: ${fps.toStringAsFixed(1)}, Processed: $_frameCount, Dropped: $_droppedFrameCount ($dropRate%)');
+                  // Reset counters for next period
+                  _frameCount = 0;
+                  _droppedFrameCount = 0;
+                }
+              }
+              _lastFpsLogTime = now;
+            }
+          }).catchError((e) {
+            // Handle conversion errors without blocking the stream
+            _conversionInProgress = false;
+            if (mounted) {
+              // Only show error for critical failures, not for every frame
+              print('Frame conversion error: $e');
+            }
+          });
         }
       });
 
@@ -180,6 +218,10 @@ class _MainScreenState extends State<MainScreen> {
       _isStreaming = false;
       _cameraController = null;
       _wsService = null;
+      _conversionInProgress = false;
+      _frameCount = 0;
+      _droppedFrameCount = 0;
+      _lastFpsLogTime = null;
     });
   }
 

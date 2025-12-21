@@ -73,7 +73,7 @@ class _MainScreenState extends State<MainScreen> {
     } else {
       // Default server URL - user should configure this
       setState(() {
-        _serverUrl = 'http://192.168.1.100:8000'; // Update with your Mac's IP
+        _serverUrl = 'http://192.168.31.128:8000'; // Update with your Mac's IP
       });
     }
   }

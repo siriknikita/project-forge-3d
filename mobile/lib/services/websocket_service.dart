@@ -15,7 +15,7 @@ class WebSocketService {
   // Frame send queue for non-blocking sends
   final StreamController<Uint8List> _sendQueue = StreamController<Uint8List>.broadcast();
   StreamSubscription<Uint8List>? _sendQueueSubscription;
-  static const int _maxQueueSize = 30; // Drop frames if queue exceeds this
+  static const int _maxQueueSize = 60; // Drop frames if queue exceeds this (increased for 30 FPS)
   
   // Bounded queue with size tracking
   final Queue<Uint8List> _frameQueue = Queue<Uint8List>();

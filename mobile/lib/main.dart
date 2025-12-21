@@ -60,7 +60,7 @@ class _MainScreenState extends State<MainScreen> {
   SendPort? _isolateSendPort;
   Isolate? _streamIsolate;
   int _pendingConversions = 0; // Track pending conversions for parallel processing
-  static const int _maxPendingConversions = 16; // Allow up to 16 parallel conversions for better throughput
+  static const int _maxPendingConversions = 32; // Allow up to 32 parallel conversions for 30 FPS target
   
   // Frame rate monitoring with rolling window
   final List<DateTime> _frameTimestamps = [];
@@ -167,18 +167,18 @@ class _MainScreenState extends State<MainScreen> {
         if (_wsService != null && _wsService!.isConnected) {
           final now = DateTime.now();
           
-          // Frame dropping: skip if too many conversions are pending (prevent memory buildup)
-          // Check this first since it's the most likely bottleneck
-          if (_pendingConversions >= _maxPendingConversions) {
+          // Frame dropping: skip only when approaching limits (less aggressive for 30 FPS)
+          // Allow more frames through by checking at 90% capacity instead of 100%
+          if (_pendingConversions >= (_maxPendingConversions * 0.9).round()) {
             _droppedFrameCount++;
-            return; // Skip this frame to prevent too many parallel conversions
+            return; // Skip this frame only when approaching conversion limit
           }
           
-          // Queue-aware frame dropping: only skip if queue is actually full (not near full)
-          // User reported queue is not full all the time, so be less aggressive
-          if (_wsService!.isQueueFull()) {
+          // Queue-aware frame dropping: only skip if queue is near full (90% threshold)
+          // Less aggressive dropping allows more frames through for higher FPS
+          if (_wsService!.isQueueNearFull() && _wsService!.getQueueSize() >= (_wsService!.getMaxQueueSize() * 0.9).round()) {
             _droppedFrameCount++;
-            return; // Skip this frame only if queue is completely full
+            return; // Skip this frame only when queue is at 90%+ capacity
           }
           
           // Time-based limiting removed - rely on queue and pending conversions only

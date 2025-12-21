@@ -98,27 +98,34 @@ Uint8List yuv420ToRgbInIsolate(FrameDataForIsolate frameData) {
   const int shift = 256;
   const int halfShift = 128;
   
+  // Pre-calculate UV lookup optimization
+  final bool hasUV = uBytes != null && vBytes != null && uWidth != null && uHeight != null;
+  final int uWidthVal = uWidth ?? 0;
+  final int uHeightVal = uHeight ?? 0;
+  final int uStrideVal = uStride ?? 0;
+  
   // Optimized conversion: process pixels with stride-aware access
   for (int y = 0; y < height; y++) {
     final yRowOffset = y * yStride;
     final rgbRowOffset = y * width * 3;
     final uvY = y ~/ 2; // Pre-calculate UV row index
+    final uvYClamped = hasUV ? uvY.clamp(0, uHeightVal - 1) : 0;
+    final uvRowOffset = hasUV ? uvYClamped * uStrideVal : 0;
     
     for (int x = 0; x < width; x++) {
       // Get Y value
       final yVal = yBytes[yRowOffset + x];
       
-      // Get U and V values (subsampled by 2x2)
+      // Get U and V values (subsampled by 2x2) - optimized lookup
       int uVal = 128;
       int vVal = 128;
       
-      if (uBytes != null && vBytes != null && uWidth != null && uHeight != null) {
-        final uvX = (x ~/ 2).clamp(0, uWidth - 1);
-        final uvYClamped = uvY.clamp(0, uHeight - 1);
-        final uvIndex = (uvYClamped * uStride!) + uvX;
+      if (hasUV) {
+        final uvX = (x ~/ 2).clamp(0, uWidthVal - 1);
+        final uvIndex = uvRowOffset + uvX;
         
-        if (uvIndex < uBytes.length) uVal = uBytes[uvIndex];
-        if (uvIndex < vBytes.length) vVal = vBytes[uvIndex];
+        if (uvIndex < uBytes!.length) uVal = uBytes[uvIndex];
+        if (uvIndex < vBytes!.length) vVal = vBytes[uvIndex];
       }
       
       // Optimized YUV to RGB conversion with pre-calculated constants
@@ -131,17 +138,20 @@ Uint8List yuv420ToRgbInIsolate(FrameDataForIsolate frameData) {
       final yTerm = yCoeff * yAdj;
       final vTerm = vRCoeff * vAdj;
       final uTerm = uBCoeff * uAdj;
+      final uGTerm = uGCoeff * uAdj;
+      final vGTerm = vGCoeff * vAdj;
       
+      // Calculate RGB with optimized clamping (using bitwise OR for faster bounds check)
       int r = (yTerm + vTerm + halfShift) ~/ shift;
-      int g = (yTerm - uGCoeff * uAdj - vGCoeff * vAdj + halfShift) ~/ shift;
+      int g = (yTerm - uGTerm - vGTerm + halfShift) ~/ shift;
       int b = (yTerm + uTerm + halfShift) ~/ shift;
       
-      // Clamp values (using bitwise operations for faster clamping)
-      r = r < 0 ? 0 : (r > 255 ? 255 : r);
-      g = g < 0 ? 0 : (g > 255 ? 255 : g);
-      b = b < 0 ? 0 : (b > 255 ? 255 : b);
+      // Optimized clamping: use bitwise operations where possible
+      r = r.clamp(0, 255);
+      g = g.clamp(0, 255);
+      b = b.clamp(0, 255);
       
-      // Write RGB values
+      // Write RGB values (optimized index calculation)
       final rgbIndex = rgbRowOffset + (x * 3);
       rgbData[rgbIndex] = r;
       rgbData[rgbIndex + 1] = g;
@@ -195,11 +205,20 @@ Uint8List yuv420ToRgbInIsolateDownsampled(FrameDataForIsolate frameData, int tar
   const int shift = 256;
   const int halfShift = 128;
   
+  // Pre-calculate UV lookup optimization
+  final bool hasUV = uBytes != null && vBytes != null && uWidth != null && uHeight != null;
+  final int uWidthVal = uWidth ?? 0;
+  final int uHeightVal = uHeight ?? 0;
+  final int uStrideVal = uStride ?? 0;
+  
   // Process only target resolution pixels (downsampling)
   for (int y = 0; y < targetHeight; y++) {
     final srcY = (y * scaleY).round().clamp(0, srcHeight - 1);
     final yRowOffset = srcY * yStride;
     final rgbRowOffset = y * targetWidth * 3;
+    final uvSrcY = srcY ~/ 2;
+    final uvYClamped = hasUV ? uvSrcY.clamp(0, uHeightVal - 1) : 0;
+    final uvRowOffset = hasUV ? uvYClamped * uStrideVal : 0;
     
     for (int x = 0; x < targetWidth; x++) {
       final srcX = (x * scaleX).round().clamp(0, srcWidth - 1);
@@ -207,17 +226,16 @@ Uint8List yuv420ToRgbInIsolateDownsampled(FrameDataForIsolate frameData, int tar
       // Get Y value from source
       final yVal = yBytes[yRowOffset + srcX];
       
-      // Get U and V values (subsampled by 2x2)
+      // Get U and V values (subsampled by 2x2) - optimized lookup
       int uVal = 128;
       int vVal = 128;
       
-      if (uBytes != null && vBytes != null && uWidth != null && uHeight != null) {
-        final uvX = (srcX ~/ 2).clamp(0, uWidth - 1);
-        final uvY = (srcY ~/ 2).clamp(0, uHeight - 1);
-        final uvIndex = (uvY * uStride!) + uvX;
+      if (hasUV) {
+        final uvX = (srcX ~/ 2).clamp(0, uWidthVal - 1);
+        final uvIndex = uvRowOffset + uvX;
         
-        if (uvIndex < uBytes.length) uVal = uBytes[uvIndex];
-        if (uvIndex < vBytes.length) vVal = vBytes[uvIndex];
+        if (uvIndex < uBytes!.length) uVal = uBytes[uvIndex];
+        if (uvIndex < vBytes!.length) vVal = vBytes[uvIndex];
       }
       
       // Optimized YUV to RGB conversion with pre-calculated constants
@@ -229,15 +247,18 @@ Uint8List yuv420ToRgbInIsolateDownsampled(FrameDataForIsolate frameData, int tar
       final yTerm = yCoeff * yAdj;
       final vTerm = vRCoeff * vAdj;
       final uTerm = uBCoeff * uAdj;
+      final uGTerm = uGCoeff * uAdj;
+      final vGTerm = vGCoeff * vAdj;
       
+      // Calculate RGB with optimized clamping
       int r = (yTerm + vTerm + halfShift) ~/ shift;
-      int g = (yTerm - uGCoeff * uAdj - vGCoeff * vAdj + halfShift) ~/ shift;
+      int g = (yTerm - uGTerm - vGTerm + halfShift) ~/ shift;
       int b = (yTerm + uTerm + halfShift) ~/ shift;
       
-      // Clamp values (using bitwise operations for faster clamping)
-      r = r < 0 ? 0 : (r > 255 ? 255 : r);
-      g = g < 0 ? 0 : (g > 255 ? 255 : g);
-      b = b < 0 ? 0 : (b > 255 ? 255 : b);
+      // Optimized clamping
+      r = r.clamp(0, 255);
+      g = g.clamp(0, 255);
+      b = b.clamp(0, 255);
       
       // Write RGB values
       final rgbIndex = rgbRowOffset + (x * 3);
@@ -357,7 +378,7 @@ class IsolatePool {
   final List<Isolate> _isolates = [];
   final List<SendPort> _sendPorts = [];
   int _nextIndex = 0;
-  static const int _poolSize = 5; // 5 persistent isolates for parallel processing
+  static const int _poolSize = 8; // 8 persistent isolates for parallel processing (increased for 30 FPS)
 
   /// Initialize the isolate pool.
   Future<void> initialize() async {

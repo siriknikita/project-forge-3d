@@ -310,6 +310,43 @@ async def export_obj(token: str = Query(..., description="Session token")):
     )
 
 
+@app.post("/export/obj/save")
+async def export_obj_save(token: str = Query(..., description="Session token")):
+    """
+    Export model as OBJ file and save to /tmp/model.obj.
+    
+    Args:
+        token: Session token
+        
+    Returns:
+        JSON response with success status
+    """
+    if not pairing_manager.validate_session_token(token):
+        raise HTTPException(status_code=401, detail="Invalid session token")
+    
+    if not ENGINE_AVAILABLE or frame_processor is None:
+        raise HTTPException(status_code=404, detail="No model available")
+    
+    model = frame_processor.getModel()
+    if model.getVertexCount() == 0:
+        raise HTTPException(status_code=404, detail="Model is empty")
+    
+    filepath = "/tmp/model.obj"
+    
+    success = model.exportOBJ(filepath)
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to export model")
+    
+    return JSONResponse(
+        content={
+            "success": True,
+            "message": "Model exported successfully",
+            "filepath": filepath
+        }
+    )
+
+
 @app.get("/session/validate")
 async def validate_session_endpoint(token: str = Query(..., description="Session token")):
     """

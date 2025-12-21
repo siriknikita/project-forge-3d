@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:isolate';
+import 'package:http/http.dart' as http;
 import 'screens/pairing_screen.dart';
 import 'services/session_manager.dart';
 import 'services/websocket_service.dart';
@@ -51,6 +54,7 @@ class _MainScreenState extends State<MainScreen> {
   String? _sessionToken;
   String? _serverUrl;
   bool _isStreaming = false;
+  bool _isExporting = false;
   CameraController? _cameraController;
   WebSocketService? _wsService;
   SendPort? _isolateSendPort;
@@ -185,6 +189,65 @@ class _MainScreenState extends State<MainScreen> {
     );
   }
 
+  void _showSuccess(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
+  Future<void> _exportModel() async {
+    if (_sessionToken == null || _serverUrl == null) {
+      _showError('Please pair device first');
+      return;
+    }
+
+    if (_isExporting) {
+      return; // Already exporting
+    }
+
+    setState(() {
+      _isExporting = true;
+    });
+
+    try {
+      final uri = Uri.parse('$_serverUrl/export/obj/save?token=$_sessionToken');
+      final response = await http
+          .post(uri, headers: {'Content-Type': 'application/json'})
+          .timeout(const Duration(seconds: 30));
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['success'] == true) {
+          _showSuccess('Model exported successfully to /tmp/model.obj');
+        } else {
+          _showError('Export failed: ${data['message'] ?? 'Unknown error'}');
+        }
+      } else {
+        try {
+          final errorData = json.decode(response.body);
+          _showError(errorData['detail'] ?? 'Export failed');
+        } catch (_) {
+          _showError('Export failed: ${response.statusCode} ${response.reasonPhrase}');
+        }
+      }
+    } on SocketException catch (e) {
+      _showError('Network error: Cannot connect to server. ${e.message}');
+    } on TimeoutException {
+      _showError('Export timeout: Server did not respond in time');
+    } catch (e) {
+      _showError('Export error: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isExporting = false;
+        });
+      }
+    }
+  }
+
   Future<void> _handlePairingSuccess(String sessionToken) async {
     setState(() {
       _sessionToken = sessionToken;
@@ -300,6 +363,29 @@ class _MainScreenState extends State<MainScreen> {
                     backgroundColor: Colors.red,
                   ),
                 ),
+              
+              const SizedBox(height: 16),
+              
+              // Export Model Button
+              ElevatedButton.icon(
+                onPressed: _isExporting ? null : _exportModel,
+                icon: _isExporting
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                        ),
+                      )
+                    : const Icon(Icons.download),
+                label: Text(_isExporting ? 'Exporting...' : 'Export Model'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  backgroundColor: Colors.blue,
+                  disabledBackgroundColor: Colors.grey,
+                ),
+              ),
               
               const SizedBox(height: 16),
               

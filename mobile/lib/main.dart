@@ -60,7 +60,7 @@ class _MainScreenState extends State<MainScreen> {
   SendPort? _isolateSendPort;
   Isolate? _streamIsolate;
   int _pendingConversions = 0; // Track pending conversions for parallel processing
-  static const int _maxPendingConversions = 3; // Allow up to 3 parallel conversions
+  static const int _maxPendingConversions = 8; // Allow up to 8 parallel conversions (increased to reduce drops)
   
   // Frame rate monitoring with rolling window
   final List<DateTime> _frameTimestamps = [];
@@ -68,6 +68,9 @@ class _MainScreenState extends State<MainScreen> {
   double _currentFps = 0.0;
   Timer? _fpsUpdateTimer;
   DateTime? _lastFpsUpdate;
+  
+  // Time-based frame rate limiting (disabled - rely on queue and pending conversions)
+  DateTime? _lastProcessedFrameTime;
 
   @override
   void initState() {
@@ -97,7 +100,7 @@ class _MainScreenState extends State<MainScreen> {
 
     _cameraController = CameraController(
       widget.cameras[0],
-      ResolutionPreset.medium,
+      ResolutionPreset.medium, // Keep medium - low might cause issues with frame rate
       enableAudio: false,
     );
 
@@ -146,6 +149,9 @@ class _MainScreenState extends State<MainScreen> {
         return;
       }
 
+      // Reset frame rate limiting
+      _lastProcessedFrameTime = null;
+
       // Start FPS update timer
       _fpsUpdateTimer = Timer.periodic(const Duration(milliseconds: 150), (timer) {
         if (mounted && _isStreaming) {
@@ -158,17 +164,22 @@ class _MainScreenState extends State<MainScreen> {
         if (_wsService != null && _wsService!.isConnected) {
           final now = DateTime.now();
           
-          // Queue-aware frame dropping: skip if queue is full or near full
-          if (_wsService!.isQueueFull() || _wsService!.isQueueNearFull()) {
-            _droppedFrameCount++;
-            return; // Skip this frame to prevent queue backup
-          }
-          
           // Frame dropping: skip if too many conversions are pending (prevent memory buildup)
+          // Check this first since it's the most likely bottleneck
           if (_pendingConversions >= _maxPendingConversions) {
             _droppedFrameCount++;
             return; // Skip this frame to prevent too many parallel conversions
           }
+          
+          // Queue-aware frame dropping: only skip if queue is actually full (not near full)
+          // User reported queue is not full all the time, so be less aggressive
+          if (_wsService!.isQueueFull()) {
+            _droppedFrameCount++;
+            return; // Skip this frame only if queue is completely full
+          }
+          
+          // Time-based limiting removed - rely on queue and pending conversions only
+          // This allows maximum throughput while still preventing memory issues
           
           // Increment pending conversions counter
           _pendingConversions++;
@@ -184,6 +195,8 @@ class _MainScreenState extends State<MainScreen> {
           CameraStreamIsolate.convertImageToBytes(image).then((frameData) {
             // Send frame non-blocking (queued)
             _wsService!.sendFrame(frameData);
+            // Update last processed frame time only after frame is sent
+            _lastProcessedFrameTime = DateTime.now();
             _pendingConversions--;
           }).catchError((e) {
             // Handle conversion errors without blocking the stream
@@ -256,6 +269,7 @@ class _MainScreenState extends State<MainScreen> {
       _droppedFrameCount = 0;
       _currentFps = 0.0;
       _lastFpsUpdate = null;
+      _lastProcessedFrameTime = null;
     });
   }
 

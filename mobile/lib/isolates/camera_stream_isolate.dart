@@ -298,10 +298,108 @@ Uint8List bgraToRgbInIsolateDownsampled(FrameDataForIsolate frameData, int targe
   return rgbData;
 }
 
+/// Isolate entry point for frame conversion worker.
+void _isolateWorkerEntry(SendPort mainSendPort) {
+  final receivePort = ReceivePort();
+  mainSendPort.send(receivePort.sendPort);
+  
+  receivePort.listen((message) {
+    if (message is Map) {
+      if (message['type'] == 'convert') {
+        final frameData = message['frameData'] as FrameDataForIsolate;
+        final resultPort = message['resultPort'] as SendPort;
+        
+        try {
+          final result = convertImageInIsolate(frameData);
+          resultPort.send({'success': true, 'result': result});
+        } catch (e) {
+          resultPort.send({'success': false, 'error': e.toString()});
+        }
+      } else if (message['type'] == 'stop') {
+        receivePort.close();
+        Isolate.exit();
+      }
+    }
+  });
+}
+
+/// Pool of persistent isolates for frame conversion.
+class IsolatePool {
+  final List<Isolate> _isolates = [];
+  final List<SendPort> _sendPorts = [];
+  int _nextIndex = 0;
+  static const int _poolSize = 3; // 3 persistent isolates for parallel processing (reduced from 4)
+
+  /// Initialize the isolate pool.
+  Future<void> initialize() async {
+    for (int i = 0; i < _poolSize; i++) {
+      final receivePort = ReceivePort();
+      final isolate = await Isolate.spawn(_isolateWorkerEntry, receivePort.sendPort);
+      final sendPort = await receivePort.first as SendPort;
+      _isolates.add(isolate);
+      _sendPorts.add(sendPort);
+    }
+  }
+
+  /// Convert frame using an available isolate from the pool.
+  Future<Uint8List> convertFrame(FrameDataForIsolate frameData) async {
+    // Use round-robin to distribute load, but don't wait for busy isolates
+    // This allows parallel processing across all isolates
+    final index = _nextIndex % _poolSize;
+    _nextIndex++;
+    
+    final resultPort = ReceivePort();
+    _sendPorts[index].send({
+      'type': 'convert',
+      'frameData': frameData,
+      'resultPort': resultPort.sendPort,
+    });
+    
+    try {
+      final result = await resultPort.first as Map;
+      
+      if (result['success'] == true) {
+        return result['result'] as Uint8List;
+      } else {
+        throw Exception(result['error'] as String);
+      }
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  /// Dispose of all isolates in the pool.
+  Future<void> dispose() async {
+    for (int i = 0; i < _sendPorts.length; i++) {
+      _sendPorts[i].send({'type': 'stop'});
+    }
+    for (final isolate in _isolates) {
+      isolate.kill(priority: Isolate.immediate);
+    }
+    _isolates.clear();
+    _sendPorts.clear();
+  }
+}
+
 /// Isolate for camera streaming to keep UI responsive.
 class CameraStreamIsolate {
+  static IsolatePool? _isolatePool;
   static const int targetFps = 30;
   static const Duration frameInterval = Duration(milliseconds: 1000 ~/ targetFps);
+
+  /// Initialize the isolate pool (call before streaming).
+  static Future<void> initializePool() async {
+    if (_isolatePool == null) {
+      _isolatePool = IsolatePool();
+      await _isolatePool!.initialize();
+    }
+  }
+
+  /// Dispose of the isolate pool (call after streaming).
+  static Future<void> disposePool() async {
+    await _isolatePool?.dispose();
+    _isolatePool = null;
+  }
 
   /// Start camera stream isolate.
   static Future<SendPort> startIsolate({
@@ -334,11 +432,6 @@ class CameraStreamIsolate {
     WebSocketService? wsService;
 
     try {
-      // Note: Camera initialization in isolate is complex
-      // For now, we'll receive camera frames from main isolate
-      // This is a simplified version - in production, you'd pass camera controller
-      // or use a different approach for isolate-based streaming
-
       // Connect WebSocket
       wsService = WebSocketService(
         serverUrl: serverUrl,
@@ -374,7 +467,7 @@ class CameraStreamIsolate {
   }
 
   /// Convert CameraImage to Uint8List in RGB format (called from main isolate).
-  /// Uses compute() to offload conversion to an isolate for non-blocking processing.
+  /// Uses compute() for frame conversion (proven to be efficient).
   static Future<Uint8List> convertImageToBytes(CameraImage image) async {
     // Extract serializable data from CameraImage
     final format = image.format.group == ImageFormatGroup.yuv420 ? 'yuv420' : 'bgra8888';
@@ -405,7 +498,7 @@ class CameraStreamIsolate {
       planeHeights: planeHeights.isNotEmpty ? planeHeights : null,
     );
     
-    // Use compute() to run conversion in isolate
+    // Use compute() - it's optimized by Flutter and works well
     return await compute(convertImageInIsolate, frameData);
   }
 

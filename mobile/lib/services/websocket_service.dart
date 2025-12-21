@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -15,6 +16,11 @@ class WebSocketService {
   final StreamController<Uint8List> _sendQueue = StreamController<Uint8List>.broadcast();
   StreamSubscription<Uint8List>? _sendQueueSubscription;
   static const int _maxQueueSize = 10; // Drop frames if queue exceeds this
+  
+  // Bounded queue with size tracking
+  final Queue<Uint8List> _frameQueue = Queue<Uint8List>();
+  int _queueSize = 0;
+  bool _isProcessingQueue = false;
 
   WebSocketService({
     required this.serverUrl,
@@ -57,7 +63,11 @@ class WebSocketService {
           (frameData) async {
             if (_channel != null && _isConnected) {
               try {
-                _channel!.sink.add(frameData);
+                // Add to bounded queue (FIFO drop if full)
+                _addToQueue(frameData);
+                
+                // Process queue asynchronously
+                _processQueue();
               } catch (e) {
                 _isConnected = false;
                 // Error will be handled by the stream listener
@@ -84,6 +94,55 @@ class WebSocketService {
     }
   }
 
+  /// Add frame to bounded queue (FIFO drop if full).
+  void _addToQueue(Uint8List frameData) {
+    if (_queueSize >= _maxQueueSize) {
+      // Queue is full, drop oldest frame (FIFO)
+      if (_frameQueue.isNotEmpty) {
+        _frameQueue.removeFirst();
+        _queueSize--;
+      }
+    }
+    _frameQueue.add(frameData);
+    _queueSize++;
+  }
+
+  /// Process queue asynchronously (one frame at a time).
+  Future<void> _processQueue() async {
+    if (_isProcessingQueue || !_isConnected) {
+      return;
+    }
+
+    _isProcessingQueue = true;
+    
+    // Process all frames in queue
+    while (_frameQueue.isNotEmpty && _isConnected) {
+      final queuedFrame = _frameQueue.removeFirst();
+      _queueSize--;
+      
+      try {
+        if (_channel != null && _isConnected) {
+          _channel!.sink.add(queuedFrame);
+        }
+      } catch (e) {
+        _isConnected = false;
+        break;
+      }
+      
+      // Small delay to prevent overwhelming the WebSocket, but only if queue is not backing up
+      if (_queueSize < _maxQueueSize * 0.5) {
+        await Future.delayed(const Duration(milliseconds: 1));
+      }
+    }
+    
+    _isProcessingQueue = false;
+    
+    // If there are more frames, process them (handles case where frames arrived while processing)
+    if (_frameQueue.isNotEmpty && _isConnected) {
+      _processQueue();
+    }
+  }
+
   /// Send binary frame data (non-blocking).
   /// Frames are queued and sent asynchronously. If queue is full, frames are dropped.
   void sendFrame(Uint8List frameData) {
@@ -91,12 +150,29 @@ class WebSocketService {
       return; // Silently ignore if not connected
     }
 
-    // Check queue size and drop frame if queue is too full
-    // Note: StreamController doesn't expose queue size directly,
-    // so we'll just add to queue and let it handle backpressure
     if (!_sendQueue.isClosed) {
       _sendQueue.add(frameData);
     }
+  }
+
+  /// Check if queue is full or near capacity.
+  bool isQueueFull() {
+    return _queueSize >= _maxQueueSize;
+  }
+
+  /// Get current queue size.
+  int getQueueSize() {
+    return _queueSize;
+  }
+
+  /// Check if queue is at or above threshold (e.g., 80% capacity).
+  bool isQueueNearFull() {
+    return _queueSize >= (_maxQueueSize * 0.8).round();
+  }
+
+  /// Get maximum queue size.
+  int getMaxQueueSize() {
+    return _maxQueueSize;
   }
 
   /// Close WebSocket connection.
@@ -107,6 +183,8 @@ class WebSocketService {
     await _closeSubscription?.cancel();
     await _channel?.sink.close();
     await _frameController?.close();
+    _frameQueue.clear();
+    _queueSize = 0;
     _channel = null;
     _frameController = null;
     _closeSubscription = null;

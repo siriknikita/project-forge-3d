@@ -61,10 +61,12 @@ class _MainScreenState extends State<MainScreen> {
   Isolate? _streamIsolate;
   bool _conversionInProgress = false;
   
-  // Frame rate monitoring
-  int _frameCount = 0;
+  // Frame rate monitoring with rolling window
+  final List<DateTime> _frameTimestamps = [];
   int _droppedFrameCount = 0;
-  DateTime? _lastFpsLogTime;
+  double _currentFps = 0.0;
+  Timer? _fpsUpdateTimer;
+  DateTime? _lastFpsUpdate;
 
   @override
   void initState() {
@@ -143,9 +145,24 @@ class _MainScreenState extends State<MainScreen> {
         return;
       }
 
+      // Start FPS update timer
+      _fpsUpdateTimer = Timer.periodic(const Duration(milliseconds: 150), (timer) {
+        if (mounted && _isStreaming) {
+          _updateFps();
+        }
+      });
+
       // Start camera stream
       await _cameraController!.startImageStream((CameraImage image) {
         if (_wsService != null && _wsService!.isConnected) {
+          final now = DateTime.now();
+          
+          // Queue-aware frame dropping: skip if queue is full or near full
+          if (_wsService!.isQueueFull() || _wsService!.isQueueNearFull()) {
+            _droppedFrameCount++;
+            return; // Skip this frame to prevent queue backup
+          }
+          
           // Frame dropping: skip if conversion is already in progress
           if (_conversionInProgress) {
             _droppedFrameCount++;
@@ -154,32 +171,19 @@ class _MainScreenState extends State<MainScreen> {
           
           // Mark conversion as in progress
           _conversionInProgress = true;
-          _frameCount++;
+          
+          // Track frame timestamp for FPS calculation
+          _frameTimestamps.add(now);
+          
+          // Clean up old timestamps (keep only last 2 seconds)
+          final cutoffTime = now.subtract(const Duration(seconds: 2));
+          _frameTimestamps.removeWhere((timestamp) => timestamp.isBefore(cutoffTime));
           
           // Convert frame in isolate (non-blocking)
           CameraStreamIsolate.convertImageToBytes(image).then((frameData) {
             // Send frame non-blocking (queued)
             _wsService!.sendFrame(frameData);
             _conversionInProgress = false;
-            
-            // Log FPS periodically (every 30 frames ~1 second at 30 FPS)
-            if (_frameCount % 30 == 0) {
-              final now = DateTime.now();
-              if (_lastFpsLogTime != null) {
-                final elapsed = now.difference(_lastFpsLogTime!).inMilliseconds / 1000.0;
-                if (elapsed > 0) {
-                  final fps = 30.0 / elapsed;
-                  final dropRate = _droppedFrameCount > 0 
-                      ? (_droppedFrameCount / (_frameCount + _droppedFrameCount) * 100).toStringAsFixed(1)
-                      : '0.0';
-                  print('FPS: ${fps.toStringAsFixed(1)}, Processed: $_frameCount, Dropped: $_droppedFrameCount ($dropRate%)');
-                  // Reset counters for next period
-                  _frameCount = 0;
-                  _droppedFrameCount = 0;
-                }
-              }
-              _lastFpsLogTime = now;
-            }
           }).catchError((e) {
             // Handle conversion errors without blocking the stream
             _conversionInProgress = false;
@@ -209,7 +213,35 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  /// Update FPS based on rolling window of frame timestamps.
+  void _updateFps() {
+    final now = DateTime.now();
+    final cutoffTime = now.subtract(const Duration(seconds: 1));
+    
+    // Count frames in the last second
+    final framesInLastSecond = _frameTimestamps.where((timestamp) => 
+      timestamp.isAfter(cutoffTime)
+    ).length;
+    
+    // Calculate FPS
+    final newFps = framesInLastSecond.toDouble();
+    
+    // Throttle UI updates (only update if FPS changed significantly or enough time passed)
+    if (_lastFpsUpdate == null || 
+        now.difference(_lastFpsUpdate!).inMilliseconds >= 150 ||
+        (newFps - _currentFps).abs() >= 1.0) {
+      if (mounted) {
+        setState(() {
+          _currentFps = newFps;
+          _lastFpsUpdate = now;
+        });
+      }
+    }
+  }
+
   Future<void> _stopStreaming() async {
+    _fpsUpdateTimer?.cancel();
+    _fpsUpdateTimer = null;
     await _cameraController?.stopImageStream();
     await _wsService?.close();
     await _cameraController?.dispose();
@@ -219,9 +251,10 @@ class _MainScreenState extends State<MainScreen> {
       _cameraController = null;
       _wsService = null;
       _conversionInProgress = false;
-      _frameCount = 0;
+      _frameTimestamps.clear();
       _droppedFrameCount = 0;
-      _lastFpsLogTime = null;
+      _currentFps = 0.0;
+      _lastFpsUpdate = null;
     });
   }
 
@@ -345,8 +378,30 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   void dispose() {
+    _fpsUpdateTimer?.cancel();
     _stopStreaming();
     super.dispose();
+  }
+
+  /// Build FPS indicator with color coding.
+  Widget _buildFpsIndicator(double fps) {
+    Color color;
+    if (fps >= 25) {
+      color = Colors.green;
+    } else if (fps >= 15) {
+      color = Colors.orange;
+    } else {
+      color = Colors.red;
+    }
+    
+    return Container(
+      width: 12,
+      height: 12,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: color,
+      ),
+    );
   }
 
   @override
@@ -457,6 +512,44 @@ class _MainScreenState extends State<MainScreen> {
                   disabledBackgroundColor: Colors.grey,
                 ),
               ),
+              
+              const SizedBox(height: 16),
+              
+              // FPS Counter (only show when streaming)
+              if (_isStreaming)
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(12.0),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _buildFpsIndicator(_currentFps),
+                        Text(
+                          'FPS: ${_currentFps.toStringAsFixed(1)}',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        Text(
+                          'Dropped: $_droppedFrameCount',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: _droppedFrameCount > 0 ? Colors.orange : Colors.grey,
+                          ),
+                        ),
+                        if (_wsService != null)
+                          Text(
+                            'Queue: ${_wsService!.getQueueSize()}/${_wsService!.getMaxQueueSize()}',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: _wsService!.isQueueNearFull() ? Colors.orange : Colors.grey,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
               
               const SizedBox(height: 16),
               

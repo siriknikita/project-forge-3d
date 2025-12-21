@@ -11,6 +11,40 @@ if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64")
     message(STATUS "Building with M4 optimizations")
 endif()
 
+# Find Python executable - prefer uv run python if available
+# This ensures we build for the same Python version that runs the server
+get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}" DIRECTORY)
+set(SERVER_DIR "${PROJECT_ROOT}/server")
+
+find_program(UV_EXECUTABLE uv)
+if(UV_EXECUTABLE AND EXISTS "${SERVER_DIR}/requirements.txt")
+    # Get Python executable from uv run python
+    execute_process(
+        COMMAND ${UV_EXECUTABLE} run python -c "import sys; print(sys.executable)"
+        OUTPUT_VARIABLE UV_PYTHON_EXECUTABLE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        WORKING_DIRECTORY ${SERVER_DIR}
+    )
+    if(UV_PYTHON_EXECUTABLE)
+        set(Python3_EXECUTABLE "${UV_PYTHON_EXECUTABLE}")
+        message(STATUS "Using Python from uv: ${Python3_EXECUTABLE}")
+    endif()
+endif()
+
+# Find Python3 with all components needed for pybind11
+# Use the executable we found if available
+find_package(Python3 COMPONENTS Interpreter Development NumPy)
+if(Python3_FOUND)
+    message(STATUS "Found Python ${Python3_VERSION} at ${Python3_EXECUTABLE}")
+    message(STATUS "Python libraries: ${Python3_LIBRARIES}")
+else()
+    message(WARNING "Python3 not found, pybind11 may use wrong Python version")
+endif()
+
+# Tell pybind11 to use FindPython instead of deprecated FindPythonInterp
+set(PYBIND11_FINDPYTHON ON)
+
 # Find required packages
 # Find pybind11 - it should be installed via pip first
 # pybind11 provides a CMake config when installed via pip

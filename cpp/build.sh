@@ -20,6 +20,12 @@ if command -v uv &> /dev/null; then
         exit 1
     fi
     PYTHON_CMD="uv run python"
+    # Get the actual Python executable path from uv
+    UV_PYTHON_EXECUTABLE=$(cd "$SERVER_DIR" && uv run python -c "import sys; print(sys.executable)" 2>/dev/null)
+    if [ -n "$UV_PYTHON_EXECUTABLE" ]; then
+        echo "Detected Python from uv: $UV_PYTHON_EXECUTABLE"
+        CMAKE_PYTHON_ARG="-DPython3_EXECUTABLE=$UV_PYTHON_EXECUTABLE"
+    fi
 else
     PYTHON_CMD="python3"
     if ! python3 -c "import pybind11" 2>/dev/null; then
@@ -28,6 +34,7 @@ else
         echo "  pip install pybind11"
         exit 1
     fi
+    CMAKE_PYTHON_ARG=""
 fi
 
 # Create build directory
@@ -37,7 +44,8 @@ cd build
 # Configure with CMake
 echo "Configuring with CMake..."
 # CMakeLists.txt will automatically detect uv and use it from server directory
-cmake .. -DCMAKE_BUILD_TYPE=Release
+# Also pass Python executable explicitly to ensure correct version
+cmake .. -DCMAKE_BUILD_TYPE=Release $CMAKE_PYTHON_ARG
 
 # Build
 echo "Building..."

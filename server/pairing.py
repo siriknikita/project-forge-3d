@@ -4,11 +4,14 @@ Device pairing and session management for secure WebSocket connections.
 import secrets
 import time
 import uuid
+import logging
 from typing import Dict, Optional, Tuple
 from datetime import datetime, timedelta
 import qrcode
 from io import BytesIO
 import base64
+
+logger = logging.getLogger(__name__)
 
 
 class PairingManager:
@@ -43,10 +46,18 @@ class PairingManager:
         self._pairing_codes[pairing_code] = (expiry_time, session_token)
         
         # Store session
-        self._sessions[session_token] = (time.time(), None)
+        created_time = time.time()
+        self._sessions[session_token] = (created_time, None)
         
         # Generate QR code
         qr_code_base64 = self._generate_qr_code(pairing_code)
+        
+        logger.info(
+            f"Generated pairing code: {pairing_code}, "
+            f"session_token: {session_token[:8]}... "
+            f"(expires in {self.PAIRING_CODE_EXPIRY_MINUTES} minutes, "
+            f"session expires in {self.SESSION_TOKEN_EXPIRY_HOURS} hours)"
+        )
         
         return pairing_code, session_token, qr_code_base64
     
@@ -64,17 +75,33 @@ class PairingManager:
         self._cleanup_expired_codes()
         
         if pairing_code not in self._pairing_codes:
+            logger.debug(f"Pairing code '{pairing_code}' not found in active codes")
             return None
         
         expiry_time, session_token = self._pairing_codes[pairing_code]
+        current_time = time.time()
         
         # Check if expired
-        if time.time() > expiry_time:
+        if current_time > expiry_time:
+            logger.debug(
+                f"Pairing code '{pairing_code}' expired "
+                f"(expired {current_time - expiry_time:.1f} seconds ago)"
+            )
             del self._pairing_codes[pairing_code]
             return None
         
         # Remove pairing code (one-time use)
         del self._pairing_codes[pairing_code]
+        
+        # Log successful verification
+        if session_token in self._sessions:
+            created_time, _ = self._sessions[session_token]
+            token_age = current_time - created_time
+            logger.info(
+                f"Pairing code '{pairing_code}' verified successfully, "
+                f"session_token: {session_token[:8]}... "
+                f"(token age: {token_age:.1f} seconds)"
+            )
         
         return session_token
     
@@ -96,12 +123,51 @@ class PairingManager:
         
         created_time, _ = self._sessions[session_token]
         expiry_time = created_time + (self.SESSION_TOKEN_EXPIRY_HOURS * 3600)
+        current_time = time.time()
         
-        if time.time() > expiry_time:
+        if current_time > expiry_time:
             del self._sessions[session_token]
             return False
         
         return True
+    
+    def get_token_age_seconds(self, session_token: str) -> Optional[float]:
+        """
+        Get the age of a session token in seconds.
+        
+        Args:
+            session_token: The session token
+            
+        Returns:
+            Token age in seconds, or None if token doesn't exist
+        """
+        if session_token not in self._sessions:
+            return None
+        
+        created_time, _ = self._sessions[session_token]
+        return time.time() - created_time
+    
+    def get_token_expiry_remaining_seconds(self, session_token: str) -> Optional[float]:
+        """
+        Get the remaining time until token expiry in seconds.
+        
+        Args:
+            session_token: The session token
+            
+        Returns:
+            Remaining seconds until expiry, or None if token doesn't exist or is expired
+        """
+        if session_token not in self._sessions:
+            return None
+        
+        created_time, _ = self._sessions[session_token]
+        expiry_time = created_time + (self.SESSION_TOKEN_EXPIRY_HOURS * 3600)
+        current_time = time.time()
+        
+        if current_time > expiry_time:
+            return None
+        
+        return expiry_time - current_time
     
     def get_session_info(self, session_token: str) -> Optional[Dict]:
         """
@@ -154,8 +220,10 @@ class PairingManager:
             code for code, (expiry, _) in self._pairing_codes.items()
             if current_time > expiry
         ]
-        for code in expired_codes:
-            del self._pairing_codes[code]
+        if expired_codes:
+            logger.debug(f"Cleaning up {len(expired_codes)} expired pairing codes")
+            for code in expired_codes:
+                del self._pairing_codes[code]
     
     def _cleanup_expired_sessions(self):
         """Remove expired sessions."""
@@ -164,6 +232,8 @@ class PairingManager:
             token for token, (created, _) in self._sessions.items()
             if current_time > (created + self.SESSION_TOKEN_EXPIRY_HOURS * 3600)
         ]
-        for token in expired_tokens:
-            del self._sessions[token]
+        if expired_tokens:
+            logger.debug(f"Cleaning up {len(expired_tokens)} expired session tokens")
+            for token in expired_tokens:
+                del self._sessions[token]
 

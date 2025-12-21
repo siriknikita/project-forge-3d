@@ -9,6 +9,7 @@ import sys
 import os
 import logging
 from typing import Optional, TYPE_CHECKING
+from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -309,6 +310,48 @@ async def export_obj(token: str = Query(..., description="Session token")):
     )
 
 
+@app.get("/session/validate")
+async def validate_session_endpoint(token: str = Query(..., description="Session token")):
+    """
+    Validate session token and return token information.
+    Useful for checking token validity before attempting WebSocket connection.
+    
+    Args:
+        token: Session token to validate
+        
+    Returns:
+        Token validation result with expiry information
+    """
+    session_info = pairing_manager.get_session_info(token)
+    
+    if not session_info:
+        # Token is invalid or expired
+        logger.info(f"Session validation failed for token '{token[:8]}...'")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired session token"
+        )
+    
+    # Calculate time remaining
+    expires_at = datetime.fromisoformat(session_info['expires_at'])
+    time_remaining_seconds = (expires_at - datetime.now()).total_seconds()
+    time_remaining_hours = time_remaining_seconds / 3600
+    
+    logger.info(
+        f"Session validation successful for token '{token[:8]}...' "
+        f"(expires in {time_remaining_hours:.2f} hours)"
+    )
+    
+    return {
+        "valid": True,
+        "token": token[:8] + "...",  # Only return partial token for security
+        "created_at": session_info["created_at"],
+        "expires_at": session_info["expires_at"],
+        "expires_in_hours": round(time_remaining_hours, 2),
+        "expires_in_seconds": int(time_remaining_seconds)
+    }
+
+
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket):
     """
@@ -317,14 +360,42 @@ async def websocket_stream(websocket: WebSocket):
     """
     global frame_processor
     
-    # Validate session token
-    try:
-        session_token = validate_session(websocket)
-    except HTTPException as e:
-        await websocket.close(code=1008, reason=e.detail)
+    # Validate session token BEFORE accepting connection
+    token = get_session_token(websocket)
+    client_ip = websocket.client.host if websocket.client else 'unknown'
+    
+    if not token:
+        logger.warning(f"WebSocket connection rejected: Missing session token from {client_ip}")
+        # Accept connection first, then close with error code
+        await websocket.accept()
+        await websocket.close(code=1002, reason="Missing session token")
         return
     
+    # Validate token and get detailed info for logging
+    token_valid = pairing_manager.validate_session_token(token)
+    if not token_valid:
+        # Get token info for detailed logging
+        session_info = pairing_manager.get_session_info(token)
+        if session_info:
+            # Token exists but expired
+            logger.warning(
+                f"WebSocket connection rejected: Expired session token '{token[:8]}...' "
+                f"from {client_ip} (expired at {session_info.get('expires_at', 'unknown')})"
+            )
+        else:
+            # Token doesn't exist
+            logger.warning(
+                f"WebSocket connection rejected: Invalid session token '{token[:8]}...' "
+                f"from {client_ip} (token not found in active sessions)"
+            )
+        # Accept connection first, then close with error code
+        await websocket.accept()
+        await websocket.close(code=1008, reason="Invalid or expired session token")
+        return
+    
+    session_token = token
     await websocket.accept()
+    logger.info(f"WebSocket connection accepted: session_token={session_token[:8]}... from {client_ip}")
     
     # Initialize frame processor if needed
     if ENGINE_AVAILABLE and frame_processor is None:

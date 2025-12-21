@@ -5,6 +5,7 @@ import 'dart:isolate';
 import 'screens/pairing_screen.dart';
 import 'services/session_manager.dart';
 import 'services/websocket_service.dart';
+import 'services/pairing_service.dart';
 import 'isolates/camera_stream_isolate.dart';
 
 void main() async {
@@ -97,6 +98,26 @@ class _MainScreenState extends State<MainScreen> {
     }
 
     try {
+      // Validate token before attempting connection
+      final pairingService = PairingService(_serverUrl!);
+      try {
+        final validationResult = await pairingService.validateSessionToken(_sessionToken!);
+        final expiresInHours = validationResult['expires_in_hours'] as double?;
+        if (expiresInHours != null && expiresInHours < 0.1) {
+          _showError('Session token expires soon. Please re-pair your device.');
+          return;
+        }
+      } catch (e) {
+        // Token is invalid or expired
+        _showError('Session token is invalid or expired. Please pair your device again.');
+        // Clear invalid token
+        await SessionManager.clearSessionToken();
+        setState(() {
+          _sessionToken = null;
+        });
+        return;
+      }
+
       await _initializeCamera();
       
       _wsService = WebSocketService(
@@ -105,11 +126,26 @@ class _MainScreenState extends State<MainScreen> {
       );
       await _wsService!.connect();
 
+      // Verify connection was established
+      if (!_wsService!.isConnected) {
+        _showError('Failed to establish WebSocket connection');
+        await _wsService!.close();
+        return;
+      }
+
       // Start camera stream
       await _cameraController!.startImageStream((CameraImage image) async {
         if (_wsService != null && _wsService!.isConnected) {
-          final frameData = CameraStreamIsolate.convertImageToBytes(image);
-          await _wsService!.sendFrame(frameData);
+          try {
+            final frameData = CameraStreamIsolate.convertImageToBytes(image);
+            await _wsService!.sendFrame(frameData);
+          } catch (e) {
+            // Connection lost during streaming
+            if (mounted) {
+              _showError('Connection lost: $e');
+              await _stopStreaming();
+            }
+          }
         }
       });
 
@@ -117,7 +153,17 @@ class _MainScreenState extends State<MainScreen> {
         _isStreaming = true;
       });
     } catch (e) {
-      _showError('Streaming error: $e');
+      String errorMessage = 'Streaming error: $e';
+      if (e.toString().contains('Authentication failed') ||
+          e.toString().contains('invalid or expired')) {
+        errorMessage = 'Session expired. Please pair your device again.';
+        // Clear invalid token
+        await SessionManager.clearSessionToken();
+        setState(() {
+          _sessionToken = null;
+        });
+      }
+      _showError(errorMessage);
     }
   }
 

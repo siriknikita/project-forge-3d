@@ -213,6 +213,35 @@ class _MainScreenState extends State<MainScreen> {
     });
 
     try {
+      // Check model status before attempting export
+      final pairingService = PairingService(_serverUrl!);
+      final modelStatus = await pairingService.getModelStatus(_sessionToken!);
+      
+      final status = modelStatus['status'] as String?;
+      final vertexCount = modelStatus['vertex_count'] as int? ?? 0;
+      final framesProcessed = modelStatus['frames_processed'] as int? ?? 0;
+      final framesRejected = modelStatus['frames_rejected'] as int? ?? 0;
+      
+      if (status == 'no_model' || vertexCount == 0) {
+        String message = 'Model is empty. ';
+        if (framesProcessed == 0 && framesRejected > 0) {
+          message += 'No frames were processed successfully. '
+              'Please check that video streaming is active and frames are being sent correctly.';
+        } else if (framesProcessed == 0) {
+          message += 'No frames have been processed yet. '
+              'Please start video streaming and record some video before exporting.';
+        } else {
+          message += 'Frames were processed but no vertices were generated. '
+              'Please ensure you are recording video with the camera.';
+        }
+        _showError(message);
+        setState(() {
+          _isExporting = false;
+        });
+        return;
+      }
+      
+      // Model has vertices, proceed with export
       final uri = Uri.parse('$_serverUrl/export/obj/save?token=$_sessionToken');
       final response = await http
           .post(uri, headers: {'Content-Type': 'application/json'})

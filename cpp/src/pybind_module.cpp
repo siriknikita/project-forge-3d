@@ -64,6 +64,7 @@ PYBIND11_MODULE(forge_engine, m) {
     // FrameProcessor::Stats
     py::class_<FrameProcessor::Stats>(m, "FrameProcessorStats")
         .def_readonly("frames_processed", &FrameProcessor::Stats::frames_processed)
+        .def_readonly("frames_rejected", &FrameProcessor::Stats::frames_rejected)
         .def_readonly("avg_processing_time_ms", &FrameProcessor::Stats::avg_processing_time_ms);
 
     // FrameProcessor

@@ -51,6 +51,7 @@ public:
      */
     struct Stats {
         uint64_t frames_processed;
+        uint64_t frames_rejected;
         double avg_processing_time_ms;
     };
 
@@ -79,6 +80,7 @@ private:
     // Statistics
     mutable std::mutex stats_mutex_;
     uint64_t frames_processed_;
+    uint64_t frames_rejected_;
     double total_processing_time_ms_;
 
     /**

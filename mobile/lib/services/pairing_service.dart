@@ -154,6 +154,42 @@ class PairingService {
       throw Exception('Token validation error: $e');
     }
   }
+
+  /// Get model status from server.
+  Future<Map<String, dynamic>> getModelStatus(String token) async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$serverUrl/model/status?token=$token'),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(_defaultTimeout);
+
+      if (response.statusCode == 200) {
+        return json.decode(response.body) as Map<String, dynamic>;
+      } else {
+        try {
+          final errorData = json.decode(response.body);
+          throw Exception(errorData['detail'] ?? 'Failed to get model status');
+        } catch (_) {
+          throw Exception(
+              'Server returned error: ${response.statusCode} ${response.reasonPhrase}');
+        }
+      }
+    } on SocketException catch (e) {
+      throw Exception(
+          'Network error: Cannot connect to server at $serverUrl. Error: ${e.message}');
+    } on HttpException catch (e) {
+      throw Exception('HTTP error: ${e.message}');
+    } on FormatException catch (e) {
+      throw Exception('Invalid server response: ${e.message}');
+    } on TimeoutException catch (e) {
+      throw Exception(
+          'Connection timeout: Server at $serverUrl did not respond within ${_defaultTimeout.inSeconds} seconds.');
+    } catch (e) {
+      throw Exception('Model status error: $e');
+    }
+  }
 }
 
 /// Response from pairing start endpoint.

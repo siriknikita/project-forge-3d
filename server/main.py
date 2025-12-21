@@ -105,6 +105,8 @@ FRAME_CONFIG = {
     "height": 1080,
     "channels": 3  # RGB
 }
+# Track if frame processor has been initialized (to detect dimensions from first frame)
+_frame_processor_initialized = False
 
 
 def get_session_token(websocket: WebSocket) -> Optional[str]:
@@ -215,15 +217,20 @@ async def get_model_status(token: str = Query(..., description="Session token"))
     if not ENGINE_AVAILABLE or frame_processor is None:
         return {
             "status": "no_model",
-            "message": "No model has been created yet"
+            "message": "No model has been created yet",
+            "frames_processed": 0,
+            "frames_rejected": 0,
+            "vertex_count": 0
         }
     
     stats = frame_processor.getStats()
-    model_stats = frame_processor.getModel().getStatistics()
+    model = frame_processor.getModel()
+    model_stats = model.getStatistics()
     
     return {
         "status": "active",
         "frames_processed": stats.frames_processed,
+        "frames_rejected": stats.frames_rejected,
         "avg_processing_time_ms": stats.avg_processing_time_ms,
         "vertex_count": model_stats.vertex_count,
         "face_count": model_stats.face_count,
@@ -434,37 +441,127 @@ async def websocket_stream(websocket: WebSocket):
     await websocket.accept()
     logger.info(f"WebSocket connection accepted: session_token={session_token[:8]}... from {client_ip}")
     
-    # Initialize frame processor if needed
-    if ENGINE_AVAILABLE and frame_processor is None:
-        config = forge_engine.FrameConfig()
-        config.width = FRAME_CONFIG["width"]
-        config.height = FRAME_CONFIG["height"]
-        config.channels = FRAME_CONFIG["channels"]
-        frame_processor = forge_engine.FrameProcessor(config)
-    
     if not ENGINE_AVAILABLE:
         await websocket.send_text("ERROR: C++ engine not available")
         await websocket.close()
         return
     
+    # Initialize frame processor dynamically from first frame
+    frame_config_detected = False
+    
     try:
+        frame_count = 0
         while True:
             # Receive binary frame data
             data = await websocket.receive_bytes()
+            frame_size = len(data)
+            frame_count += 1
             
-            # Convert to numpy array (zero-copy with pybind11)
-            frame_array = np.frombuffer(data, dtype=np.uint8)
+            # Detect frame dimensions from first frame if not initialized
+            if not frame_processor:
+                # Try to infer dimensions from frame size
+                # Assume RGB (3 channels) format
+                # Common resolutions: try to find a reasonable match
+                channels = 3  # RGB
+                possible_resolutions = [
+                    (1920, 1080),  # Full HD
+                    (1280, 720),   # HD
+                    (640, 480),    # VGA
+                    (3840, 2160),  # 4K
+                ]
+                
+                detected_width = None
+                detected_height = None
+                
+                for width, height in possible_resolutions:
+                    expected_size = width * height * channels
+                    if frame_size == expected_size:
+                        detected_width = width
+                        detected_height = height
+                        break
+                
+                if detected_width and detected_height:
+                    config = forge_engine.FrameConfig()
+                    config.width = detected_width
+                    config.height = detected_height
+                    config.channels = channels
+                    frame_processor = forge_engine.FrameProcessor(config)
+                    frame_config_detected = True
+                    logger.info(
+                        f"Frame processor initialized with detected dimensions: "
+                        f"{detected_width}x{detected_height} ({channels} channels) "
+                        f"from frame size: {frame_size} bytes"
+                    )
+                else:
+                    # If we can't detect, try to calculate from square root approximation
+                    # This is a fallback for non-standard resolutions
+                    pixels = frame_size // channels
+                    # Try to find reasonable width/height
+                    import math
+                    sqrt_pixels = int(math.sqrt(pixels))
+                    # Find closest reasonable aspect ratio (16:9)
+                    for test_height in range(sqrt_pixels - 100, sqrt_pixels + 100):
+                        test_width = pixels // test_height
+                        if test_width * test_height * channels == frame_size:
+                            detected_width = test_width
+                            detected_height = test_height
+                            break
+                    
+                    if detected_width and detected_height:
+                        config = forge_engine.FrameConfig()
+                        config.width = detected_width
+                        config.height = detected_height
+                        config.channels = channels
+                        frame_processor = forge_engine.FrameProcessor(config)
+                        frame_config_detected = True
+                        logger.info(
+                            f"Frame processor initialized with calculated dimensions: "
+                            f"{detected_width}x{detected_height} ({channels} channels) "
+                            f"from frame size: {frame_size} bytes"
+                        )
+                    else:
+                        # Fallback to default config
+                        logger.warning(
+                            f"Could not detect frame dimensions from size {frame_size} bytes. "
+                            f"Using default config: {FRAME_CONFIG['width']}x{FRAME_CONFIG['height']}"
+                        )
+                        config = forge_engine.FrameConfig()
+                        config.width = FRAME_CONFIG["width"]
+                        config.height = FRAME_CONFIG["height"]
+                        config.channels = FRAME_CONFIG["channels"]
+                        frame_processor = forge_engine.FrameProcessor(config)
+                        frame_config_detected = True
             
-            # Process frame (zero-copy to C++)
-            frame_processor.processFrame(frame_array)
+            if frame_processor:
+                # Convert to numpy array (zero-copy with pybind11)
+                frame_array = np.frombuffer(data, dtype=np.uint8)
+                
+                # Process frame (zero-copy to C++)
+                try:
+                    frame_processor.processFrame(frame_array)
+                    
+                    # Log frame processing status periodically
+                    if frame_count % 30 == 0:
+                        stats = frame_processor.getStats()
+                        model = frame_processor.getModel()
+                        vertex_count = model.getVertexCount()
+                        logger.info(
+                            f"Frame processing: {stats.frames_processed} processed, "
+                            f"{stats.frames_rejected} rejected, "
+                            f"{vertex_count} vertices in model"
+                        )
+                except Exception as e:
+                    logger.error(f"Error processing frame: {e}", exc_info=True)
+            else:
+                logger.error("Frame processor not initialized, cannot process frame")
             
             # Optional: Send acknowledgment
             # await websocket.send_text("OK")
             
     except WebSocketDisconnect:
-        print(f"Client disconnected: {session_token}")
+        logger.info(f"Client disconnected: {session_token}")
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}", exc_info=True)
         await websocket.close(code=1011, reason=str(e))
 
 

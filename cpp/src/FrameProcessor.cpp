@@ -5,8 +5,8 @@
 #include <algorithm>
 #include <thread>
 #include <future>
-
-namespace forge_engine {
+#include <iostream>
+#include <iomanip>
 
 namespace forge_engine {
 
@@ -27,8 +27,6 @@ static void processFrameDispatch(void* context) {
     delete frame_data;
 }
 
-} // namespace forge_engine
-
 // C-compatible wrapper for GCD
 extern "C" void processFrameDispatchC(void* context) {
     forge_engine::processFrameDispatch(context);
@@ -40,8 +38,12 @@ FrameProcessor::FrameProcessor(const FrameConfig& config)
     , frame_buffer_(100)  // Buffer up to 100 frames
     , processing_queue_(dispatch_queue_create("com.forge_engine.processing", DISPATCH_QUEUE_CONCURRENT))
     , frames_processed_(0)
+    , frames_rejected_(0)
     , total_processing_time_ms_(0.0)
 {
+    std::cerr << "[FrameProcessor] Initialized with config: "
+              << config.width << "x" << config.height 
+              << " (" << config.channels << " channels)" << std::endl;
 }
 
 FrameProcessor::~FrameProcessor() {
@@ -57,6 +59,18 @@ void FrameProcessor::processFrame(const uint8_t* frame_data, size_t size) {
     size_t expected_size = config_.width * config_.height * config_.channels;
     if (size != expected_size) {
         // Frame size mismatch - skip or handle error
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        frames_rejected_++;
+        
+        // Log rejection (only log first few and then every 100th to avoid spam)
+        if (frames_rejected_ <= 5 || frames_rejected_ % 100 == 0) {
+            std::cerr << "[FrameProcessor] Frame rejected: size mismatch. "
+                      << "Expected: " << expected_size << " bytes ("
+                      << config_.width << "x" << config_.height 
+                      << "x" << config_.channels << "), "
+                      << "Received: " << size << " bytes. "
+                      << "Total rejected: " << frames_rejected_ << std::endl;
+        }
         return;
     }
 
@@ -98,6 +112,8 @@ void FrameProcessor::performReconstruction(const uint8_t* frame_data, size_t siz
     // Sample every Nth pixel to create a point cloud
     const uint32_t sample_rate = 10;  // Sample every 10th pixel
     
+    uint32_t vertices_added = 0;
+    
     for (uint32_t y = 0; y < height; y += sample_rate) {
         for (uint32_t x = 0; x < width; x += sample_rate) {
             size_t idx = (y * width + x) * channels;
@@ -127,11 +143,20 @@ void FrameProcessor::performReconstruction(const uint8_t* frame_data, size_t siz
                 vertex.a = 255;
                 
                 uint32_t v_idx = model_->addVertex(vertex);
+                vertices_added++;
                 
                 // Create faces if we have enough vertices (simplified triangulation)
                 // In real implementation, proper mesh generation would be used
             }
         }
+    }
+    
+    // Log frame processing (only log occasionally to avoid spam)
+    static uint64_t frames_logged = 0;
+    if (++frames_logged % 30 == 0) {
+        std::cerr << "[FrameProcessor] Processed frame: added " << vertices_added 
+                  << " vertices. Model now has " << model_->getVertexCount() 
+                  << " vertices total." << std::endl;
     }
 }
 
@@ -143,6 +168,7 @@ FrameProcessor::Stats FrameProcessor::getStats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     Stats stats;
     stats.frames_processed = frames_processed_;
+    stats.frames_rejected = frames_rejected_;
     stats.avg_processing_time_ms = frames_processed_ > 0 
         ? total_processing_time_ms_ / frames_processed_ 
         : 0.0;
@@ -152,8 +178,10 @@ FrameProcessor::Stats FrameProcessor::getStats() const {
 void FrameProcessor::reset() {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     frames_processed_ = 0;
+    frames_rejected_ = 0;
     total_processing_time_ms_ = 0.0;
     model_->clear();
+    std::cerr << "[FrameProcessor] Reset: cleared model and statistics" << std::endl;
 }
 
 } // namespace forge_engine

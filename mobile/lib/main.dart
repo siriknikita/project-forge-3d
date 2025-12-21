@@ -60,7 +60,7 @@ class _MainScreenState extends State<MainScreen> {
   SendPort? _isolateSendPort;
   Isolate? _streamIsolate;
   int _pendingConversions = 0; // Track pending conversions for parallel processing
-  static const int _maxPendingConversions = 8; // Allow up to 8 parallel conversions (increased to reduce drops)
+  static const int _maxPendingConversions = 16; // Allow up to 16 parallel conversions for better throughput
   
   // Frame rate monitoring with rolling window
   final List<DateTime> _frameTimestamps = [];
@@ -100,7 +100,7 @@ class _MainScreenState extends State<MainScreen> {
 
     _cameraController = CameraController(
       widget.cameras[0],
-      ResolutionPreset.medium, // Keep medium - low might cause issues with frame rate
+      ResolutionPreset.low, // Use low preset for higher capture frame rate, downsampling to 640x480 for processing
       enableAudio: false,
     );
 
@@ -135,6 +135,9 @@ class _MainScreenState extends State<MainScreen> {
       }
 
       await _initializeCamera();
+      
+      // Initialize isolate pool for frame conversion
+      await CameraStreamIsolate.initializePool();
       
       _wsService = WebSocketService(
         serverUrl: _serverUrl!,
@@ -259,6 +262,9 @@ class _MainScreenState extends State<MainScreen> {
     await _cameraController?.stopImageStream();
     await _wsService?.close();
     await _cameraController?.dispose();
+    
+    // Dispose isolate pool after streaming stops
+    await CameraStreamIsolate.disposePool();
     
     setState(() {
       _isStreaming = false;

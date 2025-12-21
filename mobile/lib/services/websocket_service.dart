@@ -129,10 +129,7 @@ class WebSocketService {
         break;
       }
       
-      // Small delay to prevent overwhelming the WebSocket, but only if queue is not backing up
-      if (_queueSize < _maxQueueSize * 0.5) {
-        await Future.delayed(const Duration(milliseconds: 1));
-      }
+      // No artificial delay - process frames as fast as possible
     }
     
     _isProcessingQueue = false;

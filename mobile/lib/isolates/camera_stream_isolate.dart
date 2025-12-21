@@ -3,7 +3,6 @@ import 'dart:isolate';
 import 'dart:typed_data';
 import 'dart:io';
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import '../services/websocket_service.dart';
 
 /// Serializable frame data structure for isolate communication.
@@ -90,10 +89,20 @@ Uint8List yuv420ToRgbInIsolate(FrameDataForIsolate frameData) {
     uHeight = frameData.planeHeights![1];
   }
   
+  // Pre-calculate constants for YUV to RGB conversion
+  const int yCoeff = 298;
+  const int vRCoeff = 409;
+  const int vGCoeff = 208;
+  const int uGCoeff = 100;
+  const int uBCoeff = 516;
+  const int shift = 256;
+  const int halfShift = 128;
+  
   // Optimized conversion: process pixels with stride-aware access
   for (int y = 0; y < height; y++) {
     final yRowOffset = y * yStride;
     final rgbRowOffset = y * width * 3;
+    final uvY = y ~/ 2; // Pre-calculate UV row index
     
     for (int x = 0; x < width; x++) {
       // Get Y value
@@ -105,27 +114,32 @@ Uint8List yuv420ToRgbInIsolate(FrameDataForIsolate frameData) {
       
       if (uBytes != null && vBytes != null && uWidth != null && uHeight != null) {
         final uvX = (x ~/ 2).clamp(0, uWidth - 1);
-        final uvY = (y ~/ 2).clamp(0, uHeight - 1);
-        final uvIndex = (uvY * uStride!) + uvX;
+        final uvYClamped = uvY.clamp(0, uHeight - 1);
+        final uvIndex = (uvYClamped * uStride!) + uvX;
         
         if (uvIndex < uBytes.length) uVal = uBytes[uvIndex];
         if (uvIndex < vBytes.length) vVal = vBytes[uvIndex];
       }
       
-      // Optimized YUV to RGB conversion using integer math where possible
+      // Optimized YUV to RGB conversion with pre-calculated constants
       final yAdj = yVal - 16;
       final uAdj = uVal - 128;
       final vAdj = vVal - 128;
       
-      // ITU-R BT.601 conversion with integer optimization
-      int r = (298 * yAdj + 409 * vAdj + 128) ~/ 256;
-      int g = (298 * yAdj - 100 * uAdj - 208 * vAdj + 128) ~/ 256;
-      int b = (298 * yAdj + 516 * uAdj + 128) ~/ 256;
+      // ITU-R BT.601 conversion with optimized integer math
+      // Pre-calculate common terms
+      final yTerm = yCoeff * yAdj;
+      final vTerm = vRCoeff * vAdj;
+      final uTerm = uBCoeff * uAdj;
       
-      // Clamp values
-      r = r.clamp(0, 255);
-      g = g.clamp(0, 255);
-      b = b.clamp(0, 255);
+      int r = (yTerm + vTerm + halfShift) ~/ shift;
+      int g = (yTerm - uGCoeff * uAdj - vGCoeff * vAdj + halfShift) ~/ shift;
+      int b = (yTerm + uTerm + halfShift) ~/ shift;
+      
+      // Clamp values (using bitwise operations for faster clamping)
+      r = r < 0 ? 0 : (r > 255 ? 255 : r);
+      g = g < 0 ? 0 : (g > 255 ? 255 : g);
+      b = b < 0 ? 0 : (b > 255 ? 255 : b);
       
       // Write RGB values
       final rgbIndex = rgbRowOffset + (x * 3);
@@ -145,7 +159,7 @@ Uint8List yuv420ToRgbInIsolateDownsampled(FrameDataForIsolate frameData, int tar
   
   final rgbData = Uint8List(targetWidth * targetHeight * 3);
   
-  // Calculate scaling factors
+  // Calculate scaling factors (pre-calculate once)
   final scaleX = srcWidth / targetWidth;
   final scaleY = srcHeight / targetHeight;
   
@@ -172,6 +186,15 @@ Uint8List yuv420ToRgbInIsolateDownsampled(FrameDataForIsolate frameData, int tar
     uHeight = frameData.planeHeights![1];
   }
   
+  // Pre-calculate constants for YUV to RGB conversion
+  const int yCoeff = 298;
+  const int vRCoeff = 409;
+  const int vGCoeff = 208;
+  const int uGCoeff = 100;
+  const int uBCoeff = 516;
+  const int shift = 256;
+  const int halfShift = 128;
+  
   // Process only target resolution pixels (downsampling)
   for (int y = 0; y < targetHeight; y++) {
     final srcY = (y * scaleY).round().clamp(0, srcHeight - 1);
@@ -197,18 +220,24 @@ Uint8List yuv420ToRgbInIsolateDownsampled(FrameDataForIsolate frameData, int tar
         if (uvIndex < vBytes.length) vVal = vBytes[uvIndex];
       }
       
-      // Optimized YUV to RGB conversion
+      // Optimized YUV to RGB conversion with pre-calculated constants
       final yAdj = yVal - 16;
       final uAdj = uVal - 128;
       final vAdj = vVal - 128;
       
-      int r = (298 * yAdj + 409 * vAdj + 128) ~/ 256;
-      int g = (298 * yAdj - 100 * uAdj - 208 * vAdj + 128) ~/ 256;
-      int b = (298 * yAdj + 516 * uAdj + 128) ~/ 256;
+      // Pre-calculate common terms
+      final yTerm = yCoeff * yAdj;
+      final vTerm = vRCoeff * vAdj;
+      final uTerm = uBCoeff * uAdj;
       
-      r = r.clamp(0, 255);
-      g = g.clamp(0, 255);
-      b = b.clamp(0, 255);
+      int r = (yTerm + vTerm + halfShift) ~/ shift;
+      int g = (yTerm - uGCoeff * uAdj - vGCoeff * vAdj + halfShift) ~/ shift;
+      int b = (yTerm + uTerm + halfShift) ~/ shift;
+      
+      // Clamp values (using bitwise operations for faster clamping)
+      r = r < 0 ? 0 : (r > 255 ? 255 : r);
+      g = g < 0 ? 0 : (g > 255 ? 255 : g);
+      b = b < 0 ? 0 : (b > 255 ? 255 : b);
       
       // Write RGB values
       final rgbIndex = rgbRowOffset + (x * 3);
@@ -328,7 +357,7 @@ class IsolatePool {
   final List<Isolate> _isolates = [];
   final List<SendPort> _sendPorts = [];
   int _nextIndex = 0;
-  static const int _poolSize = 3; // 3 persistent isolates for parallel processing (reduced from 4)
+  static const int _poolSize = 5; // 5 persistent isolates for parallel processing
 
   /// Initialize the isolate pool.
   Future<void> initialize() async {
@@ -467,8 +496,13 @@ class CameraStreamIsolate {
   }
 
   /// Convert CameraImage to Uint8List in RGB format (called from main isolate).
-  /// Uses compute() for frame conversion (proven to be efficient).
+  /// Uses IsolatePool for efficient parallel frame conversion.
   static Future<Uint8List> convertImageToBytes(CameraImage image) async {
+    // Ensure pool is initialized
+    if (_isolatePool == null) {
+      await initializePool();
+    }
+    
     // Extract serializable data from CameraImage
     final format = image.format.group == ImageFormatGroup.yuv420 ? 'yuv420' : 'bgra8888';
     // Optimize: avoid copying if plane.bytes is already Uint8List (which it should be)
@@ -498,8 +532,8 @@ class CameraStreamIsolate {
       planeHeights: planeHeights.isNotEmpty ? planeHeights : null,
     );
     
-    // Use compute() - it's optimized by Flutter and works well
-    return await compute(convertImageInIsolate, frameData);
+    // Use IsolatePool for efficient parallel processing
+    return await _isolatePool!.convertFrame(frameData);
   }
 
 }

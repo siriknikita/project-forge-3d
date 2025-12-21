@@ -25,12 +25,40 @@ class _PairingScreenState extends State<PairingScreen> {
   bool _isScanning = true;
   bool _isVerifying = false;
   String? _errorMessage;
+  bool? _serverReachable;
+  bool _isCheckingConnection = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkServerConnection();
+  }
 
   @override
   void dispose() {
     _codeController.dispose();
     _qrController?.dispose();
     super.dispose();
+  }
+
+  Future<void> _checkServerConnection() async {
+    setState(() {
+      _isCheckingConnection = true;
+    });
+
+    try {
+      final pairingService = PairingService(widget.serverUrl);
+      final isReachable = await pairingService.checkServerHealth();
+      setState(() {
+        _serverReachable = isReachable;
+        _isCheckingConnection = false;
+      });
+    } catch (e) {
+      setState(() {
+        _serverReachable = false;
+        _isCheckingConnection = false;
+      });
+    }
   }
 
   Future<void> _verifyPairingCode(String code) async {
@@ -48,6 +76,30 @@ class _PairingScreenState extends State<PairingScreen> {
 
     try {
       final pairingService = PairingService(widget.serverUrl);
+      
+      // Check server connection first
+      if (_serverReachable == false) {
+        final isReachable = await pairingService.checkServerHealth();
+        if (!isReachable) {
+          setState(() {
+            _errorMessage =
+                'Cannot connect to server at ${widget.serverUrl}.\n'
+                'Please check:\n'
+                '1. Server is running\n'
+                '2. Correct IP address and port\n'
+                '3. Device and server are on the same network\n'
+                '4. Firewall allows connections';
+            _isVerifying = false;
+            _serverReachable = false;
+          });
+          return;
+        } else {
+          setState(() {
+            _serverReachable = true;
+          });
+        }
+      }
+      
       final sessionToken = await pairingService.verifyPairingCode(code);
       
       // Save session token
@@ -96,7 +148,57 @@ class _PairingScreenState extends State<PairingScreen> {
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
+            
+            // Server Connection Status
+            if (_isCheckingConnection)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    SizedBox(width: 8),
+                    Text('Checking server connection...'),
+                  ],
+                ),
+              )
+            else if (_serverReachable != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      _serverReachable! ? Icons.check_circle : Icons.error,
+                      color: _serverReachable! ? Colors.green : Colors.red,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _serverReachable!
+                          ? 'Server connected'
+                          : 'Server unreachable',
+                      style: TextStyle(
+                        color: _serverReachable! ? Colors.green : Colors.red,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    if (!_serverReachable!)
+                      IconButton(
+                        icon: const Icon(Icons.refresh, size: 20),
+                        onPressed: _checkServerConnection,
+                        tooltip: 'Retry connection',
+                      ),
+                  ],
+                ),
+              ),
+            
+            const SizedBox(height: 8),
             
             // QR Code Scanner
             if (_isScanning)

@@ -7,17 +7,28 @@ from __future__ import annotations  # Add this at the very top
 import asyncio
 import sys
 import os
+import logging
 from typing import Optional, TYPE_CHECKING
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 import numpy as np
 import uvloop
+import time
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server.pairing import PairingManager
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Try to import the C++ module (will fail if not built yet)
 try:
@@ -33,7 +44,44 @@ except ImportError:
 
 app = FastAPI(title="Forge Engine 3D Reconstruction Server")
 
-# CORS middleware for development
+
+# Request logging middleware
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        client_ip = request.client.host if request.client else "unknown"
+        
+        # Log incoming request
+        logger.info(
+            f"→ {request.method} {request.url.path} "
+            f"[Client: {client_ip}] "
+            f"[Query: {dict(request.query_params)}]"
+        )
+        
+        try:
+            response = await call_next(request)
+            process_time = time.time() - start_time
+            
+            # Log response
+            logger.info(
+                f"← {request.method} {request.url.path} "
+                f"[Status: {response.status_code}] "
+                f"[Time: {process_time:.3f}s]"
+            )
+            
+            return response
+        except Exception as e:
+            process_time = time.time() - start_time
+            logger.error(
+                f"✗ {request.method} {request.url.path} "
+                f"[Error: {str(e)}] "
+                f"[Time: {process_time:.3f}s]"
+            )
+            raise
+
+
+# Add middleware (order matters - logging should be first)
+app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # In production, restrict this
@@ -121,18 +169,32 @@ async def verify_pairing(pairing_code: str = Query(..., description="6-digit pai
     Returns:
         Session token if valid
     """
-    session_token = pairing_manager.verify_pairing_code(pairing_code)
+    logger.info(f"Pairing verification attempt for code: {pairing_code}")
     
-    if not session_token:
+    try:
+        session_token = pairing_manager.verify_pairing_code(pairing_code)
+        
+        if not session_token:
+            logger.warning(f"Pairing verification failed: Invalid or expired code '{pairing_code}'")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid or expired pairing code"
+            )
+        
+        logger.info(f"Pairing verification successful for code: {pairing_code} (session token: {session_token[:8]}...)")
+        
+        return {
+            "session_token": session_token,
+            "expires_in_hours": PairingManager.SESSION_TOKEN_EXPIRY_HOURS
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error during pairing verification for code '{pairing_code}': {e}", exc_info=True)
         raise HTTPException(
-            status_code=400,
-            detail="Invalid or expired pairing code"
+            status_code=500,
+            detail="Internal server error during pairing verification"
         )
-    
-    return {
-        "session_token": session_token,
-        "expires_in_hours": PairingManager.SESSION_TOKEN_EXPIRY_HOURS
-    }
 
 
 @app.get("/model/status")

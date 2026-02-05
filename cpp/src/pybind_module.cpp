@@ -45,6 +45,10 @@ PYBIND11_MODULE(forge_engine, m) {
         .def("getVertexCount", &Model3D::getVertexCount)
         .def("getFaceCount", &Model3D::getFaceCount)
         .def("clear", &Model3D::clear)
+        .def("generateMesh", &Model3D::generateMesh,
+             py::arg("max_edge_length") = 0.1f,
+             py::arg("cell_size") = 0.01f,
+             "Generate mesh from point cloud using spatial neighbor analysis")
         .def("exportPLY", &Model3D::exportPLY, 
              py::arg("filename"), py::arg("binary") = true)
         .def("exportOBJ", &Model3D::exportOBJ)
@@ -67,6 +71,16 @@ PYBIND11_MODULE(forge_engine, m) {
         .def_readonly("frames_rejected", &FrameProcessor::Stats::frames_rejected)
         .def_readonly("avg_processing_time_ms", &FrameProcessor::Stats::avg_processing_time_ms);
 
+    // CameraCalibration
+    py::class_<CameraCalibration>(m, "CameraCalibration")
+        .def(py::init<>())
+        .def_readwrite("fx", &CameraCalibration::fx)
+        .def_readwrite("fy", &CameraCalibration::fy)
+        .def_readwrite("cx", &CameraCalibration::cx)
+        .def_readwrite("cy", &CameraCalibration::cy)
+        .def_readwrite("scale_factor", &CameraCalibration::scale_factor)
+        .def("isValid", &CameraCalibration::isValid);
+
     // FrameProcessor
     py::class_<FrameProcessor, std::shared_ptr<FrameProcessor>>(m, "FrameProcessor")
         .def(py::init<const FrameConfig&>())
@@ -86,6 +100,14 @@ PYBIND11_MODULE(forge_engine, m) {
         }, py::arg("frame"), "Process frame with zero-copy from numpy array")
         .def("getModel", &FrameProcessor::getModel)
         .def("getStats", &FrameProcessor::getStats)
-        .def("reset", &FrameProcessor::reset);
+        .def("reset", &FrameProcessor::reset)
+        .def("setCalibration", &FrameProcessor::setCalibration,
+             py::arg("calib"), "Set camera calibration parameters")
+        .def("getCalibration", &FrameProcessor::getCalibration,
+             "Get current camera calibration")
+        .def("generateModelMesh", &FrameProcessor::generateModelMesh,
+             py::arg("max_edge_length") = 0.1f,
+             py::arg("cell_size") = 0.01f,
+             "Generate mesh from current point cloud");
 }
 

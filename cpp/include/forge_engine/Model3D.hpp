@@ -5,6 +5,9 @@
 #include <string>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
+#include <algorithm>
 
 namespace forge_engine {
 
@@ -89,6 +92,14 @@ public:
     void clear();
 
     /**
+     * Generate mesh from point cloud using spatial neighbor analysis.
+     * @param max_edge_length Maximum edge length for triangles (default: 0.1)
+     * @param cell_size Spatial hash cell size (default: 0.01)
+     * @return Number of faces generated
+     */
+    size_t generateMesh(float max_edge_length = 0.1f, float cell_size = 0.01f);
+
+    /**
      * Export to PLY format (binary or ASCII).
      */
     bool exportPLY(const std::string& filename, bool binary = true) const;
@@ -130,6 +141,29 @@ private:
     
     void computeBoundingBox(float& min_x, float& min_y, float& min_z,
                            float& max_x, float& max_y, float& max_z) const;
+    
+    // Helper structures for mesh generation
+    struct Edge {
+        uint32_t v0, v1;
+        Edge(uint32_t a, uint32_t b) : v0(std::min(a, b)), v1(std::max(a, b)) {}
+        bool operator==(const Edge& other) const {
+            return v0 == other.v0 && v1 == other.v1;
+        }
+    };
+    
+    struct EdgeHash {
+        size_t operator()(const Edge& e) const {
+            // Combine hashes with better distribution
+            size_t h1 = std::hash<uint32_t>()(e.v0);
+            size_t h2 = std::hash<uint32_t>()(e.v1);
+            return h1 ^ (h2 << 1);
+        }
+    };
+    
+    float distanceSquared(const Vertex& v1, const Vertex& v2) const;
+    float triangleArea(const Vertex& v0, const Vertex& v1, const Vertex& v2) const;
+    bool isValidTriangle(const Vertex& v0, const Vertex& v1, const Vertex& v2, 
+                         float max_edge_length, float min_area) const;
 };
 
 } // namespace forge_engine

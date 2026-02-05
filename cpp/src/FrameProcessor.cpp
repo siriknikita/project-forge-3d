@@ -350,21 +350,58 @@ CameraPose FrameProcessor::estimateCameraPose(
 }
 
 void FrameProcessor::initializeCameraIntrinsics() {
-    // Default camera intrinsics (should be calibrated for real use)
-    // Assuming a typical phone camera with 1080p resolution
-    float fx = static_cast<float>(config_.width) * 1.2f;  // Focal length in pixels
-    float fy = static_cast<float>(config_.height) * 1.2f;
-    float cx = static_cast<float>(config_.width) / 2.0f;   // Principal point
-    float cy = static_cast<float>(config_.height) / 2.0f;
+    std::lock_guard<std::mutex> lock(calibration_mutex_);
     
-    camera_matrix_ = (cv::Mat_<double>(3, 3) <<
-        fx, 0, cx,
-        0, fy, cy,
-        0, 0, 1
-    );
+    if (calibration_.isValid()) {
+        // Use calibration parameters
+        camera_matrix_ = (cv::Mat_<double>(3, 3) <<
+            static_cast<double>(calibration_.fx), 0, static_cast<double>(calibration_.cx),
+            0, static_cast<double>(calibration_.fy), static_cast<double>(calibration_.cy),
+            0, 0, 1
+        );
+        
+        // Use provided distortion coefficients or default
+        if (!calibration_.distortion_coeffs.empty()) {
+            distortion_coeffs_ = calibration_.distortion_coeffs.clone();
+        } else {
+            distortion_coeffs_ = cv::Mat::zeros(5, 1, CV_64F);
+        }
+    } else {
+        // Default camera intrinsics (should be calibrated for real use)
+        // Assuming a typical phone camera with 1080p resolution
+        float fx = static_cast<float>(config_.width) * 1.2f;  // Focal length in pixels
+        float fy = static_cast<float>(config_.height) * 1.2f;
+        float cx = static_cast<float>(config_.width) / 2.0f;   // Principal point
+        float cy = static_cast<float>(config_.height) / 2.0f;
+        
+        camera_matrix_ = (cv::Mat_<double>(3, 3) <<
+            fx, 0, cx,
+            0, fy, cy,
+            0, 0, 1
+        );
+        
+        // Default distortion coefficients (assuming minimal distortion)
+        distortion_coeffs_ = cv::Mat::zeros(5, 1, CV_64F);
+    }
+}
+
+void FrameProcessor::setCalibration(const CameraCalibration& calib) {
+    std::lock_guard<std::mutex> lock(calibration_mutex_);
+    calibration_ = calib;
     
-    // Default distortion coefficients (assuming minimal distortion)
-    distortion_coeffs_ = cv::Mat::zeros(4, 1, CV_64F);
+    // Reinitialize camera intrinsics with new calibration
+    initializeCameraIntrinsics();
+}
+
+CameraCalibration FrameProcessor::getCalibration() const {
+    std::lock_guard<std::mutex> lock(calibration_mutex_);
+    return calibration_;
+}
+
+void FrameProcessor::generateModelMesh(float max_edge_length, float cell_size) {
+    if (model_) {
+        model_->generateMesh(max_edge_length, cell_size);
+    }
 }
 
 cv::Mat FrameProcessor::convertRGBtoLAB(const cv::Mat& rgb_frame) {
@@ -498,6 +535,15 @@ void FrameProcessor::stitchHyperplanes(const cv::Mat& depth_map, const CameraPos
     double cx = camera_matrix_.at<double>(0, 2);
     double cy = camera_matrix_.at<double>(1, 2);
     
+    // Get scale factor from calibration
+    float scale_factor = 1.0f;
+    {
+        std::lock_guard<std::mutex> lock(calibration_mutex_);
+        if (calibration_.isValid()) {
+            scale_factor = calibration_.scale_factor;
+        }
+    }
+    
     // Get inverse transform (world to camera)
     Eigen::Matrix4f transform_inv = pose.transform.inverse();
     
@@ -506,7 +552,7 @@ void FrameProcessor::stitchHyperplanes(const cv::Mat& depth_map, const CameraPos
     
     // Spatial hashing parameters for duplicate detection
     const float epsilon = 0.01f;  // Distance threshold for duplicates
-    const float cell_size = epsilon * 2.0f;
+    const float cell_size_hash = epsilon * 2.0f;
     
     // Transform depth map to 3D points
     for (int y = 0; y < depth_map.rows; y += sample_rate) {
@@ -518,10 +564,13 @@ void FrameProcessor::stitchHyperplanes(const cv::Mat& depth_map, const CameraPos
                 continue;
             }
             
+            // Apply scale factor to depth
+            float Z_scaled = Z * scale_factor;
+            
             // Back-project to 3D camera coordinates
-            float X_cam = static_cast<float>((x - cx) * Z / fx);
-            float Y_cam = static_cast<float>((y - cy) * Z / fy);
-            float Z_cam = Z;
+            float X_cam = static_cast<float>((x - cx) * Z_scaled / fx);
+            float Y_cam = static_cast<float>((y - cy) * Z_scaled / fy);
+            float Z_cam = Z_scaled;
             
             // Transform to world coordinates
             Eigen::Vector4f point_cam(X_cam, Y_cam, Z_cam, 1.0f);
@@ -547,7 +596,7 @@ void FrameProcessor::stitchHyperplanes(const cv::Mat& depth_map, const CameraPos
                 float dz_dy = depth_map.at<float>(y + 1, x) - depth_map.at<float>(y - 1, x);
                 
                 // Normal in camera space
-                Eigen::Vector3f normal_cam(-dz_dx, -dz_dy, 2.0f * cell_size);
+                Eigen::Vector3f normal_cam(-dz_dx, -dz_dy, 2.0f * cell_size_hash);
                 normal_cam.normalize();
                 
                 // Transform normal to world space
@@ -583,8 +632,8 @@ void FrameProcessor::stitchHyperplanes(const cv::Mat& depth_map, const CameraPos
         }
     }
     
-    // Note: Mesh generation would be done periodically, not every frame
-    // For now, we just add vertices. Mesh triangulation can be added later.
+    // Note: Mesh generation is done separately via generateModelMesh()
+    // to avoid performance impact during frame processing
 }
 
 } // namespace forge_engine

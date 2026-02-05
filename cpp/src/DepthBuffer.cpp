@@ -2,6 +2,7 @@
 #include "forge_engine/FrameProcessor.hpp"
 #include <algorithm>
 #include <cmath>
+#include <Eigen/Dense>
 #include <opencv2/core/eigen.hpp>
 
 namespace forge_engine {

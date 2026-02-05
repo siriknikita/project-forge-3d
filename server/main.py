@@ -220,7 +220,8 @@ async def get_model_status(token: str = Query(..., description="Session token"))
             "message": "No model has been created yet",
             "frames_processed": 0,
             "frames_rejected": 0,
-            "vertex_count": 0
+            "vertex_count": 0,
+            "face_count": 0
         }
     
     stats = frame_processor.getStats()
@@ -388,6 +389,143 @@ async def export_obj_save(token: str = Query(..., description="Session token")):
             "filepath": filepath
         }
     )
+
+
+@app.post("/model/generate-mesh")
+async def generate_mesh(
+    token: str = Query(..., description="Session token"),
+    max_edge_length: float = Query(0.1, description="Maximum edge length for triangles"),
+    cell_size: float = Query(0.01, description="Spatial hash cell size")
+):
+    """
+    Generate mesh from point cloud.
+    
+    Args:
+        token: Session token
+        max_edge_length: Maximum edge length for triangles (default: 0.1)
+        cell_size: Spatial hash cell size (default: 0.01)
+        
+    Returns:
+        JSON response with mesh generation results
+    """
+    if not pairing_manager.validate_session_token(token):
+        raise HTTPException(status_code=401, detail="Invalid session token")
+    
+    if not ENGINE_AVAILABLE or frame_processor is None:
+        raise HTTPException(status_code=404, detail="No model available")
+    
+    model = frame_processor.getModel()
+    if model.getVertexCount() == 0:
+        raise HTTPException(status_code=404, detail="Model is empty")
+    
+    try:
+        faces_before = model.getFaceCount()
+        faces_generated = model.generateMesh(max_edge_length, cell_size)
+        faces_after = model.getFaceCount()
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "message": "Mesh generated successfully",
+                "faces_generated": faces_generated,
+                "faces_before": faces_before,
+                "faces_after": faces_after,
+                "vertex_count": model.getVertexCount()
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error generating mesh: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to generate mesh: {str(e)}")
+
+
+@app.get("/camera/calibration")
+async def get_camera_calibration(token: str = Query(..., description="Session token")):
+    """
+    Get current camera calibration parameters.
+    
+    Args:
+        token: Session token
+        
+    Returns:
+        Camera calibration parameters
+    """
+    if not pairing_manager.validate_session_token(token):
+        raise HTTPException(status_code=401, detail="Invalid session token")
+    
+    if not ENGINE_AVAILABLE or frame_processor is None:
+        raise HTTPException(status_code=404, detail="Frame processor not available")
+    
+    try:
+        calib = frame_processor.getCalibration()
+        return {
+            "fx": calib.fx,
+            "fy": calib.fy,
+            "cx": calib.cx,
+            "cy": calib.cy,
+            "scale_factor": calib.scale_factor,
+            "is_valid": calib.isValid()
+        }
+    except Exception as e:
+        logger.error(f"Error getting calibration: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get calibration: {str(e)}")
+
+
+@app.post("/camera/calibration")
+async def set_camera_calibration(
+    token: str = Query(..., description="Session token"),
+    fx: float = Query(..., description="Focal length X in pixels"),
+    fy: float = Query(..., description="Focal length Y in pixels"),
+    cx: float = Query(..., description="Principal point X"),
+    cy: float = Query(..., description="Principal point Y"),
+    scale_factor: float = Query(1.0, description="Depth-to-world scale factor")
+):
+    """
+    Set camera calibration parameters.
+    
+    Args:
+        token: Session token
+        fx: Focal length X in pixels
+        fy: Focal length Y in pixels
+        cx: Principal point X
+        cy: Principal point Y
+        scale_factor: Depth-to-world scale factor (default: 1.0)
+        
+    Returns:
+        JSON response with success status
+    """
+    if not pairing_manager.validate_session_token(token):
+        raise HTTPException(status_code=401, detail="Invalid session token")
+    
+    if not ENGINE_AVAILABLE or frame_processor is None:
+        raise HTTPException(status_code=404, detail="Frame processor not available")
+    
+    try:
+        calib = forge_engine.CameraCalibration()
+        calib.fx = fx
+        calib.fy = fy
+        calib.cx = cx
+        calib.cy = cy
+        calib.scale_factor = scale_factor
+        
+        frame_processor.setCalibration(calib)
+        
+        return JSONResponse(
+            content={
+                "success": True,
+                "message": "Calibration set successfully",
+                "calibration": {
+                    "fx": calib.fx,
+                    "fy": calib.fy,
+                    "cx": calib.cx,
+                    "cy": calib.cy,
+                    "scale_factor": calib.scale_factor,
+                    "is_valid": calib.isValid()
+                }
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error setting calibration: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to set calibration: {str(e)}")
 
 
 @app.get("/session/validate")

@@ -27,6 +27,25 @@ struct FrameConfig {
 };
 
 /**
+ * Camera calibration parameters.
+ */
+struct CameraCalibration {
+    float fx, fy;           // Focal length in pixels
+    float cx, cy;           // Principal point (optical center)
+    float scale_factor;     // Depth-to-world scale (e.g., meters per depth unit)
+    cv::Mat distortion_coeffs;  // Lens distortion coefficients (k1, k2, p1, p2, k3)
+    
+    CameraCalibration() 
+        : fx(0.0f), fy(0.0f), cx(0.0f), cy(0.0f), scale_factor(1.0f) {
+        distortion_coeffs = cv::Mat::zeros(5, 1, CV_64F);
+    }
+    
+    bool isValid() const {
+        return fx > 0.0f && fy > 0.0f && scale_factor > 0.0f;
+    }
+};
+
+/**
  * Camera pose with rotation and translation.
  */
 struct CameraPose {
@@ -181,6 +200,24 @@ public:
      */
     void stitchHyperplanes(const cv::Mat& depth_map, const CameraPose& pose, const cv::Mat& frame);
 
+    /**
+     * Set camera calibration parameters.
+     * @param calib Camera calibration struct
+     */
+    void setCalibration(const CameraCalibration& calib);
+
+    /**
+     * Get current camera calibration.
+     */
+    CameraCalibration getCalibration() const;
+
+    /**
+     * Generate mesh from current point cloud.
+     * @param max_edge_length Maximum edge length for triangles (default: 0.1)
+     * @param cell_size Spatial hash cell size (default: 0.01)
+     */
+    void generateModelMesh(float max_edge_length = 0.1f, float cell_size = 0.01f);
+
 private:
     FrameConfig config_;
     std::shared_ptr<Model3D> model_;
@@ -215,6 +252,10 @@ private:
     // Camera intrinsics (default values, should be calibrated)
     cv::Mat camera_matrix_;
     cv::Mat distortion_coeffs_;
+    
+    // Camera calibration
+    mutable std::mutex calibration_mutex_;
+    CameraCalibration calibration_;
 
     /**
      * Internal frame processing (runs on GCD queue).
@@ -222,7 +263,7 @@ private:
     void processFrameInternal(const uint8_t* frame_data, size_t size);
     
     /**
-     * Initialize camera intrinsics with default values.
+     * Initialize camera intrinsics with default values or from calibration.
      */
     void initializeCameraIntrinsics();
 };

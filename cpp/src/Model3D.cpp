@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <unordered_map>
+#include <unordered_set>
+#include <limits>
 
 namespace forge_engine {
 
@@ -252,6 +255,251 @@ bool Model3D::exportGLB(const std::string& filename,
               << "Consider using exportOBJ() or integrating tinygltf." << std::endl;
     
     return false;  // Indicate that full GLB export is not yet implemented
+}
+
+float Model3D::distanceSquared(const Vertex& v1, const Vertex& v2) const {
+    float dx = v1.x - v2.x;
+    float dy = v1.y - v2.y;
+    float dz = v1.z - v2.z;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+float Model3D::triangleArea(const Vertex& v0, const Vertex& v1, const Vertex& v2) const {
+    // Compute triangle area using cross product
+    float ax = v1.x - v0.x;
+    float ay = v1.y - v0.y;
+    float az = v1.z - v0.z;
+    
+    float bx = v2.x - v0.x;
+    float by = v2.y - v0.y;
+    float bz = v2.z - v0.z;
+    
+    // Cross product
+    float cx = ay * bz - az * by;
+    float cy = az * bx - ax * bz;
+    float cz = ax * by - ay * bx;
+    
+    // Area = 0.5 * |cross product|
+    return 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+}
+
+bool Model3D::isValidTriangle(const Vertex& v0, const Vertex& v1, const Vertex& v2,
+                               float max_edge_length, float min_area) const {
+    // Check edge lengths
+    float edge01_sq = distanceSquared(v0, v1);
+    float edge12_sq = distanceSquared(v1, v2);
+    float edge20_sq = distanceSquared(v2, v0);
+    
+    float max_edge_sq = max_edge_length * max_edge_length;
+    if (edge01_sq > max_edge_sq || edge12_sq > max_edge_sq || edge20_sq > max_edge_sq) {
+        return false;
+    }
+    
+    // Check triangle area (avoid degenerate triangles)
+    float area = triangleArea(v0, v1, v2);
+    if (area < min_area) {
+        return false;
+    }
+    
+    // Check for consistent normal (avoid flipped triangles)
+    // Compute triangle normal
+    float ax = v1.x - v0.x;
+    float ay = v1.y - v0.y;
+    float az = v1.z - v0.z;
+    
+    float bx = v2.x - v0.x;
+    float by = v2.y - v0.y;
+    float bz = v2.z - v0.z;
+    
+    float nx = ay * bz - az * by;
+    float ny = az * bx - ax * bz;
+    float nz = ax * by - ay * bx;
+    
+    float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (len < 1e-6f) {
+        return false;  // Degenerate triangle
+    }
+    
+    nx /= len;
+    ny /= len;
+    nz /= len;
+    
+    // Check consistency with vertex normals (if they exist)
+    float dot0 = nx * v0.nx + ny * v0.ny + nz * v0.nz;
+    float dot1 = nx * v1.nx + ny * v1.ny + nz * v1.nz;
+    float dot2 = nx * v2.nx + ny * v2.ny + nz * v2.nz;
+    
+    // Allow some tolerance for normal consistency
+    float normal_threshold = 0.3f;  // ~73 degrees
+    if (dot0 < normal_threshold && dot1 < normal_threshold && dot2 < normal_threshold) {
+        return false;  // Triangle normal inconsistent with vertex normals
+    }
+    
+    return true;
+}
+
+size_t Model3D::generateMesh(float max_edge_length, float cell_size) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Clear existing faces
+    faces_.clear();
+    
+    if (vertices_.size() < 3) {
+        return 0;  // Need at least 3 vertices for a triangle
+    }
+    
+    // Compute bounding box for spatial hashing
+    float min_x, min_y, min_z, max_x, max_y, max_z;
+    computeBoundingBox(min_x, min_y, min_z, max_x, max_y, max_z);
+    
+    // Initialize spatial hash
+    // Use a 3D grid to partition space
+    int grid_x = static_cast<int>(std::ceil((max_x - min_x) / cell_size)) + 1;
+    int grid_y = static_cast<int>(std::ceil((max_y - min_y) / cell_size)) + 1;
+    int grid_z = static_cast<int>(std::ceil((max_z - min_z) / cell_size)) + 1;
+    
+    // Limit grid size to avoid excessive memory usage
+    const int MAX_GRID_SIZE = 1000;
+    if (grid_x > MAX_GRID_SIZE || grid_y > MAX_GRID_SIZE || grid_z > MAX_GRID_SIZE) {
+        // Adjust cell size to fit within limits
+        float max_dim = std::max({max_x - min_x, max_y - min_y, max_z - min_z});
+        cell_size = max_dim / MAX_GRID_SIZE;
+        grid_x = static_cast<int>(std::ceil((max_x - min_x) / cell_size)) + 1;
+        grid_y = static_cast<int>(std::ceil((max_y - min_y) / cell_size)) + 1;
+        grid_z = static_cast<int>(std::ceil((max_z - min_z) / cell_size)) + 1;
+    }
+    
+    // Hash function for 3D grid
+    auto hash3D = [grid_x, grid_y, grid_z](int x, int y, int z) -> size_t {
+        return static_cast<size_t>(x + grid_x * (y + grid_y * z));
+    };
+    
+    // Build spatial hash: cell -> list of vertex indices
+    std::unordered_map<size_t, std::vector<uint32_t>> spatial_hash;
+    
+    for (uint32_t i = 0; i < vertices_.size(); ++i) {
+        const auto& v = vertices_[i];
+        int cell_x = static_cast<int>((v.x - min_x) / cell_size);
+        int cell_y = static_cast<int>((v.y - min_y) / cell_size);
+        int cell_z = static_cast<int>((v.z - min_z) / cell_size);
+        
+        size_t cell_hash = hash3D(cell_x, cell_y, cell_z);
+        spatial_hash[cell_hash].push_back(i);
+    }
+    
+    // For each vertex, find neighbors and form triangles
+    const int k_neighbors = 8;  // Target number of neighbors
+    const float min_area = 1e-6f;  // Minimum triangle area
+    
+    // Track edges to avoid duplicate triangles
+    std::unordered_set<Edge, EdgeHash> processed_edges;
+    
+    size_t faces_added = 0;
+    
+    for (uint32_t vidx = 0; vidx < vertices_.size(); ++vidx) {
+        const auto& vertex = vertices_[vidx];
+        
+        // Find cell for this vertex
+        int cell_x = static_cast<int>((vertex.x - min_x) / cell_size);
+        int cell_y = static_cast<int>((vertex.y - min_y) / cell_size);
+        int cell_z = static_cast<int>((vertex.z - min_z) / cell_size);
+        
+        // Collect neighbors from current cell and adjacent cells
+        std::vector<std::pair<uint32_t, float>> candidates;  // (vertex_index, distance_squared)
+        
+        // Check current cell and 26 adjacent cells (3x3x3 neighborhood)
+        for (int dx = -1; dx <= 1; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    int nx = cell_x + dx;
+                    int ny = cell_y + dy;
+                    int nz = cell_z + dz;
+                    
+                    if (nx < 0 || ny < 0 || nz < 0) continue;
+                    
+                    size_t cell_hash = hash3D(nx, ny, nz);
+                    auto it = spatial_hash.find(cell_hash);
+                    if (it == spatial_hash.end()) continue;
+                    
+                    for (uint32_t nidx : it->second) {
+                        if (nidx == vidx) continue;  // Skip self
+                        
+                        float dist_sq = distanceSquared(vertex, vertices_[nidx]);
+                        float max_dist_sq = max_edge_length * max_edge_length;
+                        
+                        if (dist_sq <= max_dist_sq) {
+                            candidates.push_back({nidx, dist_sq});
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sort by distance and take k nearest
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const auto& a, const auto& b) { return a.second < b.second; });
+        
+        if (candidates.size() < 2) continue;
+        
+        // Take up to k_neighbors
+        size_t num_neighbors = std::min(static_cast<size_t>(k_neighbors), candidates.size());
+        
+        // Form triangles with pairs of neighbors
+        for (size_t i = 0; i < num_neighbors; ++i) {
+            for (size_t j = i + 1; j < num_neighbors; ++j) {
+                uint32_t n1_idx = candidates[i].first;
+                uint32_t n2_idx = candidates[j].first;
+                
+                const auto& n1 = vertices_[n1_idx];
+                const auto& n2 = vertices_[n2_idx];
+                
+                // Check if triangle is valid
+                if (!isValidTriangle(vertex, n1, n2, max_edge_length, min_area)) {
+                    continue;
+                }
+                
+                // Create edges and check for duplicates
+                Edge e1(vidx, n1_idx);
+                Edge e2(n1_idx, n2_idx);
+                Edge e3(n2_idx, vidx);
+                
+                // Check if any edge was already used in a triangle
+                // (simple check - in a more sophisticated version, we'd track edge->face mapping)
+                // For now, we'll allow multiple triangles sharing edges
+                
+                // Ensure consistent winding order (counter-clockwise when viewed from outside)
+                // Use triangle normal to determine winding
+                float ax = n1.x - vertex.x;
+                float ay = n1.y - vertex.y;
+                float az = n1.z - vertex.z;
+                
+                float bx = n2.x - vertex.x;
+                float by = n2.y - vertex.y;
+                float bz = n2.z - vertex.z;
+                
+                float nx = ay * bz - az * by;
+                float ny = az * bx - ax * bz;
+                float nz = ax * by - ay * bx;
+                
+                // Check if normal points in reasonable direction (use vertex normal as reference)
+                float dot = nx * vertex.nx + ny * vertex.ny + nz * vertex.nz;
+                
+                // Add triangle
+                if (dot >= 0.0f) {
+                    faces_.emplace_back(vidx, n1_idx, n2_idx);
+                } else {
+                    faces_.emplace_back(vidx, n2_idx, n1_idx);  // Reverse winding
+                }
+                
+                faces_added++;
+            }
+        }
+    }
+    
+    std::cerr << "[Model3D] Generated " << faces_added << " faces from " 
+              << vertices_.size() << " vertices" << std::endl;
+    
+    return faces_added;
 }
 
 } // namespace forge_engine

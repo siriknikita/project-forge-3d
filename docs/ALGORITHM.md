@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the core algorithm used in Project Forge-3D for real-time 3D reconstruction from 2D video streams. The system uses feature detection (FAST/ORB) for camera pose estimation, color-depth heuristics for depth estimation, and min-max composition with median filtering to merge depth information across frames.
+This document describes the core algorithm used in Project Forge-3D for real-time 3D reconstruction from 2D video streams. The system uses feature detection (FAST/ORB) for camera pose estimation, color-depth heuristics for depth estimation, min-max composition with median filtering to merge depth information across frames, spatial hashing for mesh generation from point clouds, and camera calibration for accurate depth-to-world coordinate conversion.
 
 ## Table of Contents
 
@@ -109,10 +109,75 @@ $$\begin{bmatrix} X_w \\ Y_w \\ Z_w \\ 1 \end{bmatrix} = \begin{bmatrix} R_t & T
 - Apply distance threshold: points within $\epsilon$ distance are considered duplicates
 - Average or weighted average of duplicate points based on confidence (gradient magnitude)
 
-**Mesh Generation:**
-- Option 1: Delaunay triangulation in 2D projection, then lift to 3D
-- Option 2: Poisson surface reconstruction from point cloud
-- Option 3: Marching cubes on voxel grid
+**Depth-to-World Coordinate Conversion:**
+When camera calibration is provided, depth values are scaled using the calibration scale factor:
+
+$$Z_{world} = Z_{depth} \cdot s$$
+
+Where $s$ is the `scale_factor` from camera calibration (e.g., meters per depth unit).
+
+The back-projection to 3D camera coordinates uses calibrated intrinsics:
+
+$$X_{cam} = \frac{(x - c_x) \cdot Z_{world}}{f_x}, \quad Y_{cam} = \frac{(y - c_y) \cdot Z_{world}}{f_y}, \quad Z_{cam} = Z_{world}$$
+
+Where $(f_x, f_y)$ are focal lengths and $(c_x, c_y)$ is the principal point from calibration.
+
+### 1.5 Mesh Generation from Point Cloud
+
+The system generates triangular meshes from point clouds using spatial neighbor analysis. This converts unconnected vertices into a proper 3D mesh with face connectivity.
+
+**Spatial Hashing:**
+The 3D space is partitioned into a uniform grid with cell size $c$ (default: 0.01 units). Each vertex is hashed to its containing cell:
+
+$$\text{cell}_x = \lfloor \frac{x - x_{min}}{c} \rfloor, \quad \text{cell}_y = \lfloor \frac{y - y_{min}}{c} \rfloor, \quad \text{cell}_z = \lfloor \frac{z - z_{min}}{c} \rfloor$$
+
+**Neighbor Finding:**
+For each vertex $v_i$, the algorithm:
+1. Identifies the cell containing $v_i$ and all 26 adjacent cells (3×3×3 neighborhood)
+2. Collects candidate neighbors from these cells
+3. Filters candidates by maximum edge length: $d(v_i, v_j) \leq L_{max}$
+4. Selects the $k$ nearest neighbors (default: $k = 8$)
+
+**Triangle Formation:**
+For each vertex $v_i$ with neighbors $\{n_1, n_2, \ldots, n_k\}$, triangles are formed by pairing neighbors:
+
+$$\text{Triangle}(v_i, n_j, n_k) \text{ for } j < k$$
+
+**Quality Filtering:**
+Each candidate triangle is validated:
+
+1. **Edge Length Check:** All edges must satisfy $d \leq L_{max}$
+2. **Area Check:** Triangle area must exceed minimum threshold: $\text{Area} \geq A_{min}$ (default: $10^{-6}$)
+3. **Normal Consistency:** Triangle normal $\vec{n}_{tri}$ should be consistent with vertex normals:
+   $$\vec{n}_{tri} \cdot \vec{n}_v \geq \theta_{normal}$$ (default: $\theta_{normal} = 0.3$, ~73°)
+
+**Triangle Normal Computation:**
+$$\vec{n}_{tri} = \frac{(\vec{v}_1 - \vec{v}_0) \times (\vec{v}_2 - \vec{v}_0)}{|(\vec{v}_1 - \vec{v}_0) \times (\vec{v}_2 - \vec{v}_0)|}$$
+
+**Winding Order:**
+Triangles are oriented to ensure consistent winding (counter-clockwise when viewed from outside):
+- If $\vec{n}_{tri} \cdot \vec{n}_v \geq 0$: Use order $(v_i, n_j, n_k)$
+- Otherwise: Reverse to $(v_i, n_k, n_j)$
+
+### 1.6 Camera Calibration
+
+The system supports camera calibration for accurate depth-to-world coordinate conversion.
+
+**Calibration Parameters:**
+- $f_x, f_y$: Focal lengths in pixels
+- $c_x, c_y$: Principal point (optical center) in pixels
+- $s$: Scale factor for depth-to-world conversion (e.g., meters per depth unit)
+- $\mathbf{d}$: Distortion coefficients $(k_1, k_2, p_1, p_2, k_3)$
+
+**Camera Intrinsic Matrix:**
+$$K = \begin{bmatrix} f_x & 0 & c_x \\ 0 & f_y & c_y \\ 0 & 0 & 1 \end{bmatrix}$$
+
+**Default Calibration:**
+If calibration is not provided, the system uses estimated intrinsics:
+- $f_x = 1.2 \cdot W$, $f_y = 1.2 \cdot H$ (where $W \times H$ is frame resolution)
+- $c_x = W/2$, $c_y = H/2$
+- $s = 1.0$ (assumes depth units are already in world units)
+- $\mathbf{d} = \mathbf{0}$ (no distortion)
 
 ## 2. Algorithm Pseudocode
 
@@ -157,13 +222,11 @@ FOR each frame Fₜ:
     Z_composed = composeDepthMaps(D)  // Min-max with median
     
     // Step 5: Hyperplane Stitching
-    pointCloudₜ = transformTo3D(Z_composed, θₜ, Tₜ)
+    pointCloudₜ = transformTo3D(Z_composed, θₜ, Tₜ, calibration)
     M.merge(pointCloudₜ)
     
-    // Step 6: Mesh Update (periodic, not every frame)
-    IF t mod 10 == 0:
-        M.generateMesh()
-        M.updateUVCoordinates(Fₜ)
+    // Note: Mesh generation is done separately via API call
+    // M.generateMesh(max_edge_length, cell_size) when requested
 
 RETURN M
 ```
@@ -218,6 +281,41 @@ class KeypointTracker {
         const cv::Mat& desc1,
         const cv::Mat& desc2
     );
+};
+```
+
+### 3.4 CameraCalibration
+
+```cpp
+struct CameraCalibration {
+    float fx, fy;              // Focal lengths in pixels
+    float cx, cy;              // Principal point
+    float scale_factor;         // Depth-to-world scale
+    cv::Mat distortion_coeffs;  // Lens distortion (k1, k2, p1, p2, k3)
+    
+    bool isValid() const;       // Check if calibration is valid
+};
+```
+
+### 3.5 Model3D
+
+```cpp
+class Model3D {
+    // Vertices and faces
+    std::vector<Vertex> vertices_;
+    std::vector<Face> faces_;
+    
+    // Mesh generation
+    size_t generateMesh(
+        float max_edge_length = 0.1f,
+        float cell_size = 0.01f
+    );
+    
+    // Helper methods for mesh generation
+    float distanceSquared(const Vertex& v1, const Vertex& v2) const;
+    float triangleArea(const Vertex& v0, const Vertex& v1, const Vertex& v2) const;
+    bool isValidTriangle(const Vertex& v0, const Vertex& v1, const Vertex& v2,
+                         float max_edge_length, float min_area) const;
 };
 ```
 
@@ -343,17 +441,23 @@ composeDepthMaps(depth_buffer):
 ### Step 5: Hyperplane Stitching
 
 ```
-stitchHyperplanes(composed_depth, pose, model):
+stitchHyperplanes(composed_depth, pose, model, calibration):
+    // Get scale factor from calibration
+    scale_factor = calibration.isValid() ? calibration.scale_factor : 1.0
+    
     // Transform depth map to 3D points
     point_cloud = []
     
     FOR each pixel (x, y):
-        Z = composed_depth(x, y)
+        Z_depth = composed_depth(x, y)
         
-        // Back-project to 3D
-        X_cam = (x - cx) * Z / fx
-        Y_cam = (y - cy) * Z / fy
-        Z_cam = Z
+        // Apply scale factor
+        Z_world = Z_depth * scale_factor
+        
+        // Back-project to 3D using calibrated intrinsics
+        X_cam = (x - cx) * Z_world / fx
+        Y_cam = (y - cy) * Z_world / fy
+        Z_cam = Z_world
         
         // Transform to world coordinates
         point_cam = [X_cam, Y_cam, Z_cam, 1]
@@ -364,11 +468,68 @@ stitchHyperplanes(composed_depth, pose, model):
     // Merge with existing model
     model.mergePointCloud(point_cloud, epsilon=0.01)
     
-    // Generate mesh (periodic)
-    IF shouldGenerateMesh():
-        model.generateMesh()
+    // Note: Mesh generation is done separately via API
+    // model.generateMesh(max_edge_length, cell_size)
     
     RETURN model
+```
+
+### Step 6: Mesh Generation
+
+```
+generateMesh(point_cloud, max_edge_length, cell_size):
+    // Clear existing faces
+    faces.clear()
+    
+    IF point_cloud.size() < 3:
+        RETURN 0  // Need at least 3 vertices
+    
+    // Compute bounding box
+    (min_x, min_y, min_z, max_x, max_y, max_z) = computeBoundingBox(point_cloud)
+    
+    // Build spatial hash grid
+    grid_x = ceil((max_x - min_x) / cell_size) + 1
+    grid_y = ceil((max_y - min_y) / cell_size) + 1
+    grid_z = ceil((max_z - min_z) / cell_size) + 1
+    
+    spatial_hash = {}
+    FOR each vertex v_i in point_cloud:
+        cell_x = floor((v_i.x - min_x) / cell_size)
+        cell_y = floor((v_i.y - min_y) / cell_size)
+        cell_z = floor((v_i.z - min_z) / cell_size)
+        spatial_hash[cell_x, cell_y, cell_z].append(i)
+    
+    // Generate triangles
+    FOR each vertex v_i:
+        // Find neighbors in 3×3×3 cell neighborhood
+        candidates = []
+        FOR dx, dy, dz in [-1, 0, 1]:
+            cell = spatial_hash[cell_x + dx, cell_y + dy, cell_z + dz]
+            FOR each vertex v_j in cell:
+                IF v_j != v_i AND distance(v_i, v_j) <= max_edge_length:
+                    candidates.append((j, distance²(v_i, v_j)))
+        
+        // Sort by distance and take k nearest
+        sort(candidates by distance)
+        neighbors = candidates[0:min(k, len(candidates))]
+        
+        // Form triangles with pairs of neighbors
+        FOR j in range(len(neighbors)):
+            FOR k in range(j+1, len(neighbors)):
+                n1 = neighbors[j]
+                n2 = neighbors[k]
+                
+                IF isValidTriangle(v_i, n1, n2, max_edge_length, min_area):
+                    // Check normal consistency
+                    n_tri = computeTriangleNormal(v_i, n1, n2)
+                    dot = n_tri · v_i.normal
+                    
+                    IF dot >= 0:
+                        faces.append((i, n1, n2))
+                    ELSE:
+                        faces.append((i, n2, n1))  // Reverse winding
+    
+    RETURN len(faces)
 ```
 
 ## 5. Performance Characteristics
@@ -378,7 +539,8 @@ stitchHyperplanes(composed_depth, pose, model):
 - Pose Estimation: $O(M \log M)$ where $M$ is number of matches
 - Depth Calculation: $O(W \cdot H)$
 - Composition: $O(N \cdot W \cdot H)$ where $N$ is buffer size
-- Stitching: $O(P \log P)$ where $P$ is number of points
+- Stitching: $O(P)$ where $P$ is number of points (with spatial sampling)
+- Mesh Generation: $O(P \cdot k^2)$ where $P$ is vertices and $k$ is neighbors per vertex (typically $k=8$)
 
 **Space Complexity:**
 - Depth Buffer: $O(N \cdot W \cdot H)$
@@ -400,8 +562,14 @@ stitchHyperplanes(composed_depth, pose, model):
 - Depth Range: $Z_{max} = 10.0$ units
 - Composition Window: Last 10 frames
 - Spatial Hash Resolution: $\epsilon = 0.01$ units
-- Mesh Generation Frequency: Every 10 frames
+- Mesh Generation: On-demand via API (not automatic)
+- Mesh Parameters:
+  - Maximum edge length: $L_{max} = 0.1$ units
+  - Spatial hash cell size: $c = 0.01$ units
+  - Number of neighbors: $k = 8$
+  - Minimum triangle area: $A_{min} = 10^{-6}$
 - Gradient Kernel: Scharr (3×3) or Sobel (3×3)
+- Camera Calibration: Default estimated values (can be set via API)
 
 **Tunable Parameters:**
 - `alpha_weight`: Weight for luminance component (auto-tuned)
@@ -410,6 +578,11 @@ stitchHyperplanes(composed_depth, pose, model):
 - `feature_threshold`: Sensitivity of feature detection
 - `match_ratio`: Ratio test for feature matching (e.g., 0.7)
 - `outlier_threshold`: Threshold for RANSAC in pose estimation
+- `max_edge_length`: Maximum triangle edge length for mesh generation (default: 0.1)
+- `cell_size`: Spatial hash cell size for mesh generation (default: 0.01)
+- `fx, fy`: Camera focal lengths in pixels (calibration)
+- `cx, cy`: Camera principal point in pixels (calibration)
+- `scale_factor`: Depth-to-world scale factor (calibration, default: 1.0)
 
 ## 7. Error Handling and Edge Cases
 
@@ -441,10 +614,32 @@ The algorithm is implemented in C++ using:
 
 The main processing pipeline is in `FrameProcessor::performReconstruction()`, which orchestrates all the algorithm steps described above.
 
+### API Endpoints
+
+The system provides REST API endpoints for mesh generation and camera calibration:
+
+**Mesh Generation:**
+- `POST /model/generate-mesh?token=<token>&max_edge_length=<float>&cell_size=<float>`
+  - Generates mesh from current point cloud
+  - Returns number of faces generated
+
+**Camera Calibration:**
+- `GET /camera/calibration?token=<token>`
+  - Returns current calibration parameters
+- `POST /camera/calibration?token=<token>&fx=<float>&fy=<float>&cx=<float>&cy=<float>&scale_factor=<float>`
+  - Sets camera calibration parameters
+  - Updates camera intrinsics for subsequent frame processing
+
+**Model Status:**
+- `GET /model/status?token=<token>`
+  - Returns model statistics including vertex count and face count
+
 ## References
 
 - OpenCV Documentation: https://docs.opencv.org/
 - Eigen Documentation: https://eigen.tuxfamily.org/
 - glTF 2.0 Specification: https://www.khronos.org/gltf/
 - Computer Vision: Algorithms and Applications (Szeliski, 2010)
+- Spatial Hashing for Real-Time Collision Detection (Teschner et al., 2003)
+- Surface Reconstruction from Point Clouds (Berger et al., 2017)
 
